@@ -9,15 +9,91 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Reface structura proiectului
+        run: |
+          mkdir -p app/src/main/java/ro/calculatorcursa app/src/main/res/xml app/src/main/res/values
+          for f in Calc.kt MainActivity.kt Parser.kt RideAccessibilityService.kt; do
+            if [ -f "$f" ]; then mv -f "$f" app/src/main/java/ro/calculatorcursa/; fi
+          done
+          if [ -f AndroidManifest.xml ]; then mv -f AndroidManifest.xml app/src/main/; fi
+          if [ -f accessibility_config.xml ]; then mv -f accessibility_config.xml app/src/main/res/xml/; fi
+          if [ -f strings.xml ]; then mv -f strings.xml app/src/main/res/values/; fi
+
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "CalculatorCursa"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=false
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "ro.calculatorcursa"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "ro.calculatorcursa"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF
+          find . -path ./.git -prune -o -type f -print | sort
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
+
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
+
       - uses: actions/upload-artifact@v4
         with:
           name: CalculatorCursa-apk
