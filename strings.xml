@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Calculator Cursă</string>
+    <string name="service_desc">Citește oferta de cursă din aplicațiile Bolt Driver și Uber Driver și afișează deasupra ei profitul net. Nu trimite date nicăieri.</string>
+</resources>
