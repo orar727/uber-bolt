@@ -10,16 +10,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reface structura proiectului
+      - name: Scrie proiectul
         run: |
-          mkdir -p app/src/main/java/ro/calculatorcursa app/src/main/res/xml app/src/main/res/values
-          for f in Calc.kt MainActivity.kt Parser.kt RideAccessibilityService.kt; do
-            if [ -f "$f" ]; then mv -f "$f" app/src/main/java/ro/calculatorcursa/; fi
-          done
-          if [ -f AndroidManifest.xml ]; then mv -f AndroidManifest.xml app/src/main/; fi
-          if [ -f accessibility_config.xml ]; then mv -f accessibility_config.xml app/src/main/res/xml/; fi
-          if [ -f strings.xml ]; then mv -f strings.xml app/src/main/res/values/; fi
-
+          mkdir -p app app/src/main app/src/main/java/ro/calculatorcursa app/src/main/res/values app/src/main/res/xml
+          rm -f Calc.kt MainActivity.kt Parser.kt RideAccessibilityService.kt AndroidManifest.xml accessibility_config.xml strings.xml
           cat > settings.gradle.kts <<'EOF'
           pluginManagement {
               repositories {
@@ -38,21 +32,18 @@ jobs:
           rootProject.name = "CalculatorCursa"
           include(":app")
           EOF
-
           cat > build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application") version "8.5.2" apply false
               id("org.jetbrains.kotlin.android") version "1.9.24" apply false
           }
           EOF
-
           cat > gradle.properties <<'EOF'
           org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
-          android.useAndroidX=false
+          android.useAndroidX=true
           android.nonTransitiveRClass=true
           kotlin.code.style=official
           EOF
-
           cat > app/build.gradle.kts <<'EOF'
           plugins {
               id("com.android.application")
@@ -67,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 1
-                  versionName = "1.0"
+                  versionCode = 2
+                  versionName = "1.1"
               }
 
               compileOptions {
@@ -77,6 +68,559 @@ jobs:
               }
               kotlinOptions {
                   jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("com.google.mlkit:text-recognition:16.0.1")
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <application
+                  android:allowBackup="false"
+                  android:label="@string/app_name"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".RideAccessibilityService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canRetrieveWindowContent="true"
+              android:canTakeScreenshot="true"
+              android:notificationTimeout="100"
+              android:packageNames="ee.mtakso.driver,com.ubercab.driver"
+              android:description="@string/service_desc" />
+          EOF
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="app_name">Calculator Cursă</string>
+              <string name="service_desc">Citește oferta de cursă din aplicațiile Bolt Driver și Uber Driver și afișează deasupra ei profitul net. Nu trimite date nicăieri.</string>
+          </resources>
+          EOF
+          cat > app/src/main/java/ro/calculatorcursa/Calc.kt <<'EOF'
+          package ro.calculatorcursa
+
+          import android.content.Context
+
+          object Prefs {
+              // cheie, etichetă, valoare implicită
+              val defs = listOf(
+                  Triple("price", "Preț combustibil (lei/l sau lei/kWh)", "8.6"),
+                  Triple("cons", "Consum (l sau kWh la 100 km)", "7.0"),
+                  Triple("wear", "Uzură și întreținere (lei/km)", "0.35"),
+                  Triple("comBolt", "Comision Bolt scăzut în plus (%)", "0"),
+                  Triple("comUber", "Comision Uber scăzut în plus (%)", "0"),
+                  Triple("minKm", "Minim lei/km net", "1.5"),
+                  Triple("minH", "Minim lei/oră net", "40")
+              )
+
+              fun raw(ctx: Context, key: String): String {
+                  val d = defs.first { it.first == key }.third
+                  return ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE).getString(key, d) ?: d
+              }
+
+              fun get(ctx: Context, key: String): Double {
+                  val d = defs.first { it.first == key }.third
+                  return raw(ctx, key).replace(',', '.').toDoubleOrNull() ?: d.toDouble()
+              }
+
+              fun save(ctx: Context, key: String, value: String) {
+                  ctx.getSharedPreferences("cfg", Context.MODE_PRIVATE).edit().putString(key, value).apply()
+              }
+          }
+
+          data class Result(
+              val net: Double,
+              val perKm: Double,
+              val perHour: Double,
+              val verdict: Int // 2 = acceptă, 1 = limită, 0 = refuză
+          )
+
+          object Calc {
+              fun compute(ctx: Context, o: Offer): Result {
+                  val km = o.pickupKm + o.tripKm
+                  val min = maxOf(o.pickupMin + o.tripMin, 1.0)
+                  val com = if (o.platform == "Bolt") Prefs.get(ctx, "comBolt") else Prefs.get(ctx, "comUber")
+                  val fuel = km * Prefs.get(ctx, "cons") / 100.0 * Prefs.get(ctx, "price")
+                  val wear = km * Prefs.get(ctx, "wear")
+                  val net = o.fare * (1.0 - com / 100.0) - fuel - wear
+                  val perKm = if (km > 0) net / km else 0.0
+                  val perHour = net / (min / 60.0)
+                  val okKm = perKm >= Prefs.get(ctx, "minKm")
+                  val okH = perHour >= Prefs.get(ctx, "minH")
+                  val v = when {
+                      net <= 0.0 -> 0
+                      okKm && okH -> 2
+                      okKm || okH -> 1
+                      else -> 0
+                  }
+                  return Result(net, perKm, perHour, v)
+              }
+          }
+          EOF
+          cat > app/src/main/java/ro/calculatorcursa/MainActivity.kt <<'EOF'
+          package ro.calculatorcursa
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.graphics.Typeface
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              private lateinit var status: TextView
+              private val fields = LinkedHashMap<String, EditText>()
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(16), dp(24), dp(16), dp(32))
+
+                  val h = TextView(this)
+                  h.text = "Calculator Cursă"
+                  h.textSize = 26f
+                  h.setTypeface(Typeface.DEFAULT_BOLD)
+                  root.addView(h)
+
+                  status = TextView(this)
+                  status.textSize = 15f
+                  status.setPadding(0, dp(8), 0, dp(8))
+                  root.addView(status)
+
+                  val acc = Button(this)
+                  acc.text = "Deschide setările de accesibilitate"
+                  acc.setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  root.addView(acc)
+
+                  val info = TextView(this)
+                  info.textSize = 13f
+                  info.text = "Activează „Calculator Cursă” în Accesibilitate > Aplicații instalate. " +
+                      "Dacă Android blochează activarea: Setări > Aplicații > Calculator Cursă > meniul ⋮ > Permite setări restricționate."
+                  info.setPadding(0, dp(8), 0, dp(16))
+                  root.addView(info)
+
+                  for ((key, label, _) in Prefs.defs) {
+                      val l = TextView(this)
+                      l.text = label
+                      l.textSize = 13f
+                      root.addView(l)
+                      val e = EditText(this)
+                      e.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                      e.setText(Prefs.raw(this, key))
+                      root.addView(e)
+                      fields[key] = e
+                  }
+
+                  val note = TextView(this)
+                  note.textSize = 12f
+                  note.text = "Bolt și Uber afișează deja suma netă. Lasă comisionul pe 0, dacă nu vrei să scazi încă o taxă."
+                  note.setPadding(0, dp(8), 0, dp(8))
+                  root.addView(note)
+
+                  val save = Button(this)
+                  save.text = "Salvează"
+                  save.setOnClickListener {
+                      for ((k, e) in fields) Prefs.save(this, k, e.text.toString())
+                      Toast.makeText(this, "Salvat", Toast.LENGTH_SHORT).show()
+                  }
+                  root.addView(save)
+
+                  val sv = ScrollView(this)
+                  sv.addView(root)
+                  setContentView(sv)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+                  val on = enabled.contains(packageName)
+                  status.text = if (on) "Serviciu activ. Deschide Bolt sau Uber Driver." else "Serviciul nu este activ."
+              }
+          }
+          EOF
+          cat > app/src/main/java/ro/calculatorcursa/Parser.kt <<'EOF'
+          package ro.calculatorcursa
+
+          data class Offer(
+              val platform: String,
+              val fare: Double,
+              val pickupMin: Double,
+              val pickupKm: Double,
+              val tripMin: Double,
+              val tripKm: Double
+          )
+
+          object Parser {
+              const val BOLT = "ee.mtakso.driver"
+              const val UBER = "com.ubercab.driver"
+
+              // Bolt: "29,92 lei (NET, taxe incluse)", "4 min • 1.8 km", "17 min • 9.7 km"
+              private val boltFare = Regex("""(?<![\d.,])(\d[\d.]*(?:,\d{1,2})?)\s*lei(?!\s*/)""", RegexOption.IGNORE_CASE)
+              private val boltLeg = Regex("""(\d+)\s*min\W{0,6}(\d+(?:[.,]\d+)?)\s*km""", RegexOption.IGNORE_CASE)
+
+              // Uber: "37,78 RON", "+8,05 RON pentru preluare", "La 2 min. (0.6 km) distanță", "Cursă: 29 min. (16.3 km)"
+              private val uberFare = Regex("""(?<![+\d.,])(\d[\d.]*[,.]\d{2})\s*RON(?!\s*/)""", RegexOption.IGNORE_CASE)
+              private val uberPickup = Regex("""\b[LI]a\s+(\d+)\s*min\.?\s*\(\s*(\d+(?:[.,]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
+              private val uberTrip = Regex("""Curs\S{0,2}\s*:?\s*(\d+)\s*min\.?\s*\(\s*(\d+(?:[.,]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
+
+              fun num(s: String): Double? {
+                  var t = s.trim()
+                  if (t.contains(',') && t.contains('.')) {
+                      t = if (t.lastIndexOf(',') > t.lastIndexOf('.')) {
+                          t.replace(".", "").replace(',', '.')
+                      } else {
+                          t.replace(",", "")
+                      }
+                  } else if (t.contains(',')) {
+                      t = t.replace(',', '.')
+                  }
+                  return t.toDoubleOrNull()
+              }
+
+              fun parse(pkg: String, text: String): Offer? {
+                  return when (pkg) {
+                      BOLT -> parseBolt(text)
+                      UBER -> parseUber(text)
+                      else -> null
+                  }
+              }
+
+              // Suma cursei = cea mai mare sumă găsită (ignoră bonusul "+x RON" și "RON/km")
+              private fun biggest(re: Regex, text: String): Double? {
+                  var best: Double? = null
+                  for (m in re.findAll(text)) {
+                      val v = num(m.groupValues[1]) ?: continue
+                      if (best == null || v > best) best = v
+                  }
+                  return best
+              }
+
+              private fun parseBolt(text: String): Offer? {
+                  val fare = biggest(boltFare, text) ?: return null
+                  val legs = boltLeg.findAll(text).toList()
+                  if (legs.size < 2) return null
+                  val pMin = num(legs[0].groupValues[1]) ?: return null
+                  val pKm = num(legs[0].groupValues[2]) ?: return null
+                  val tMin = num(legs[1].groupValues[1]) ?: return null
+                  val tKm = num(legs[1].groupValues[2]) ?: return null
+                  return Offer("Bolt", fare, pMin, pKm, tMin, tKm)
+              }
+
+              private fun parseUber(text: String): Offer? {
+                  val fare = biggest(uberFare, text) ?: return null
+                  val p = uberPickup.find(text) ?: return null
+                  val t = uberTrip.find(text) ?: return null
+                  val pMin = num(p.groupValues[1]) ?: return null
+                  val pKm = num(p.groupValues[2]) ?: return null
+                  val tMin = num(t.groupValues[1]) ?: return null
+                  val tKm = num(t.groupValues[2]) ?: return null
+                  return Offer("Uber", fare, pMin, pKm, tMin, tKm)
+              }
+          }
+          EOF
+          cat > app/src/main/java/ro/calculatorcursa/RideAccessibilityService.kt <<'EOF'
+          package ro.calculatorcursa
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.AccessibilityService.ScreenshotResult
+          import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
+          import android.graphics.Bitmap
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Build
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.util.Log
+          import android.view.Display
+          import android.view.Gravity
+          import android.view.WindowManager
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import com.google.mlkit.vision.common.InputImage
+          import com.google.mlkit.vision.text.TextRecognition
+          import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+          import java.util.Locale
+
+          class RideAccessibilityService : AccessibilityService() {
+
+              private val tag = "CalculatorCursa"
+              private val handler = Handler(Looper.getMainLooper())
+              private var wm: WindowManager? = null
+              private var overlay: LinearLayout? = null
+              private var title: TextView? = null
+              private var detail: TextView? = null
+
+              private var lastScan = 0L
+              private var lastOcr = 0L
+              private var ocrBusy = false
+              private var lastOfferAt = 0L
+              private var lastAppAt = 0L
+              private var lastPkg: String? = null
+              private var lastKey = ""
+
+              private val recognizer by lazy {
+                  TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+              }
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      val now = SystemClock.uptimeMillis()
+                      val pkg = lastPkg
+                      if (pkg != null && now - lastAppAt < 6000) {
+                          scan(pkg)
+                      }
+                      if (overlay != null && now - lastOfferAt > 3000) removeOverlay()
+                      handler.postDelayed(this, 1000)
+                  }
+              }
+
+              override fun onServiceConnected() {
+                  super.onServiceConnected()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  handler.postDelayed(tick, 1000)
+              }
+
+              override fun onInterrupt() {
+                  removeOverlay()
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacksAndMessages(null)
+                  removeOverlay()
+                  super.onDestroy()
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  val pkg = event?.packageName?.toString() ?: return
+                  if (pkg != Parser.BOLT && pkg != Parser.UBER) return
+                  lastPkg = pkg
+                  lastAppAt = SystemClock.uptimeMillis()
+                  scan(pkg)
+              }
+
+              // 1) text din accesibilitate, 2) dacă nu găsește oferta: OCR pe captură de ecran
+              private fun scan(pkg: String) {
+                  val now = SystemClock.uptimeMillis()
+                  if (now - lastScan < 300) return
+                  lastScan = now
+
+                  val root = rootInActiveWindow
+                  if (root != null) {
+                      val lines = ArrayList<String>()
+                      collect(root, lines, 0)
+                      if (handleText(pkg, lines.joinToString("\n"))) return
+                  }
+                  ocr(pkg)
+              }
+
+              private fun handleText(pkg: String, text: String): Boolean {
+                  var parsed: Offer? = null
+                  try {
+                      parsed = Parser.parse(pkg, text)
+                  } catch (e: Exception) {
+                      Log.e(tag, "parse: $e")
+                  }
+                  val offer = parsed ?: return false
+
+                  lastOfferAt = SystemClock.uptimeMillis()
+                  val key = "${offer.platform}|${offer.fare}|${offer.pickupKm}|${offer.tripKm}|${offer.tripMin}"
+                  if (key == lastKey && overlay != null) return true
+                  lastKey = key
+
+                  val r = Calc.compute(this, offer)
+                  Log.d(tag, "oferta=$offer rezultat=$r")
+                  show(offer, r)
+                  return true
+              }
+
+              private fun ocr(pkg: String) {
+                  if (Build.VERSION.SDK_INT < 30) return
+                  if (ocrBusy) return
+                  val now = SystemClock.uptimeMillis()
+                  if (now - lastOcr < 1300) return
+                  lastOcr = now
+                  ocrBusy = true
+
+                  try {
+                      takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
+                          override fun onSuccess(result: ScreenshotResult) {
+                              var sw: Bitmap? = null
+                              try {
+                                  val hb = result.hardwareBuffer
+                                  val hw = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
+                                  sw = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                                  hb.close()
+                              } catch (e: Exception) {
+                                  Log.e(tag, "bitmap: $e")
+                              }
+                              if (sw == null) {
+                                  ocrBusy = false
+                                  return
+                              }
+                              recognizer.process(InputImage.fromBitmap(sw, 0))
+                                  .addOnSuccessListener { t ->
+                                      Log.d(tag, "OCR: " + t.text.replace("\n", " | "))
+                                      handleText(pkg, t.text)
+                                  }
+                                  .addOnFailureListener { e -> Log.e(tag, "ocr: $e") }
+                                  .addOnCompleteListener { ocrBusy = false }
+                          }
+
+                          override fun onFailure(errorCode: Int) {
+                              Log.e(tag, "screenshot eroare $errorCode")
+                              ocrBusy = false
+                          }
+                      })
+                  } catch (e: Exception) {
+                      Log.e(tag, "takeScreenshot: $e")
+                      ocrBusy = false
+                  }
+              }
+
+              private fun collect(n: AccessibilityNodeInfo?, out: MutableList<String>, depth: Int) {
+                  if (n == null || depth > 40) return
+                  val t = n.text
+                  if (t != null && t.isNotBlank()) {
+                      out.add(t.toString())
+                  } else {
+                      val d = n.contentDescription
+                      if (d != null && d.isNotBlank()) out.add(d.toString())
+                  }
+                  for (i in 0 until n.childCount) {
+                      collect(n.getChild(i), out, depth + 1)
+                  }
+              }
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun fmt(v: Double): String = String.format(Locale("ro", "RO"), "%.2f", v)
+
+              // Textul din bandă nu conține "lei", "RON", "min" sau "km", ca OCR-ul să nu îl confunde cu oferta.
+              private fun show(o: Offer, r: Result) {
+                  val manager = wm ?: return
+                  val word: String
+                  val color: Int
+                  when (r.verdict) {
+                      2 -> {
+                          word = "ACCEPTĂ"
+                          color = Color.parseColor("#E6118C5A")
+                      }
+                      1 -> {
+                          word = "LIMITĂ"
+                          color = Color.parseColor("#E6B36B00")
+                      }
+                      else -> {
+                          word = "REFUZĂ"
+                          color = Color.parseColor("#E6C62832")
+                      }
+                  }
+
+                  if (overlay == null) {
+                      val box = LinearLayout(this)
+                      box.orientation = LinearLayout.VERTICAL
+                      box.setPadding(dp(14), dp(10), dp(14), dp(10))
+
+                      val t = TextView(this)
+                      t.setTextColor(Color.WHITE)
+                      t.textSize = 22f
+                      t.setTypeface(Typeface.DEFAULT_BOLD)
+
+                      val d = TextView(this)
+                      d.setTextColor(Color.WHITE)
+                      d.textSize = 15f
+
+                      box.addView(t)
+                      box.addView(d)
+
+                      val lp = WindowManager.LayoutParams(
+                          resources.displayMetrics.widthPixels - dp(32),
+                          WindowManager.LayoutParams.WRAP_CONTENT,
+                          WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                          PixelFormat.TRANSLUCENT
+                      )
+                      lp.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                      lp.y = dp(70)
+
+                      try {
+                          manager.addView(box, lp)
+                          overlay = box
+                          title = t
+                          detail = d
+                      } catch (e: Exception) {
+                          Log.e(tag, "overlay: $e")
+                          return
+                      }
+                  }
+
+                  val bg = GradientDrawable()
+                  bg.setColor(color)
+                  bg.cornerRadius = dp(10).toFloat()
+                  overlay?.background = bg
+                  title?.text = "$word   net ${fmt(r.net)}"
+                  detail?.text = "${fmt(r.perKm)} /km  •  ${fmt(r.perHour)} /oră  •  ${o.platform}"
+              }
+
+              private fun removeOverlay() {
+                  val v = overlay ?: return
+                  try {
+                      wm?.removeView(v)
+                  } catch (e: Exception) {
+                  }
+                  overlay = null
+                  title = null
+                  detail = null
+                  lastKey = ""
               }
           }
           EOF
