@@ -12,7 +12,7 @@ jobs:
 
       - name: Scrie proiectul
         run: |
-          mkdir -p app app/src/main app/src/main/java/ro/calculatorcursa app/src/main/res/values app/src/main/res/xml
+          mkdir -p app app/src/main app/src/main/java/ro/calculatorcursa app/src/main/res/mipmap-xxxhdpi app/src/main/res/values app/src/main/res/xml
           rm -f Calc.kt MainActivity.kt Parser.kt RideAccessibilityService.kt AndroidManifest.xml accessibility_config.xml strings.xml
           cat > settings.gradle.kts <<'EOF'
           pluginManagement {
@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 4
-                  versionName = "1.3"
+                  versionCode = 5
+                  versionName = "1.4"
               }
 
               compileOptions {
@@ -81,6 +81,7 @@ jobs:
 
               <application
                   android:allowBackup="false"
+                  android:icon="@mipmap/ic_launcher"
                   android:label="@string/app_name"
                   android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
@@ -113,6 +114,7 @@ jobs:
           <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
               android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
               android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRetrieveInteractiveWindows"
               android:canRetrieveWindowContent="true"
               android:canTakeScreenshot="true"
               android:notificationTimeout="100"
@@ -122,7 +124,7 @@ jobs:
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="app_name">Calculator Cursă</string>
+              <string name="app_name">FCM APP</string>
               <string name="service_desc">Citește oferta de cursă din aplicațiile Bolt Driver și Uber Driver și afișează deasupra ei profitul net. Nu trimite date nicăieri.</string>
           </resources>
           EOF
@@ -223,7 +225,7 @@ jobs:
                   root.setPadding(dp(16), dp(24), dp(16), dp(32))
 
                   val h = TextView(this)
-                  h.text = "Calculator Cursă"
+                  h.text = "FCM APP"
                   h.textSize = 26f
                   h.setTypeface(Typeface.DEFAULT_BOLD)
                   root.addView(h)
@@ -242,8 +244,8 @@ jobs:
 
                   val info = TextView(this)
                   info.textSize = 13f
-                  info.text = "Activează „Calculator Cursă” în Accesibilitate > Aplicații instalate. " +
-                      "Dacă Android blochează activarea: Setări > Aplicații > Calculator Cursă > meniul ⋮ > Permite setări restricționate."
+                  info.text = "Activează „FCM APP” în Accesibilitate > Aplicații instalate. " +
+                      "Dacă Android blochează activarea: Setări > Aplicații > FCM APP > meniul ⋮ > Permite setări restricționate."
                   info.setPadding(0, dp(8), 0, dp(16))
                   root.addView(info)
 
@@ -414,7 +416,6 @@ jobs:
               private var ocrBusy = false
               private var lastOfferAt = 0L
               private var lastAppAt = 0L
-              private var lastPkg: String? = null
               private var lastKey = ""
 
               private val recognizer by lazy {
@@ -424,19 +425,16 @@ jobs:
               private val tick = object : Runnable {
                   override fun run() {
                       val now = SystemClock.uptimeMillis()
-                      val pkg = lastPkg
-                      if (pkg != null && now - lastAppAt < 6000) {
-                          scan(pkg)
-                      }
-                      if (overlay != null && now - lastOfferAt > 3000) removeOverlay()
-                      handler.postDelayed(this, 1000)
+                      scan()
+                      if (overlay != null && now - lastOfferAt > 3500) removeOverlay()
+                      handler.postDelayed(this, 600)
                   }
               }
 
               override fun onServiceConnected() {
                   super.onServiceConnected()
                   wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                  handler.postDelayed(tick, 1000)
+                  handler.postDelayed(tick, 600)
               }
 
               override fun onInterrupt() {
@@ -452,27 +450,44 @@ jobs:
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {
                   val pkg = event?.packageName?.toString() ?: return
                   if (pkg != Parser.BOLT && pkg != Parser.UBER) return
-                  lastPkg = pkg
                   lastAppAt = SystemClock.uptimeMillis()
-                  scan(pkg)
+                  scan()
               }
 
-              // 1) text din accesibilitate, 2) dacă nu găsește oferta: OCR pe captură de ecran
-              private fun scan(pkg: String) {
+              // 1) textul ferestrelor Bolt/Uber de pe ecran (și cardul de ofertă afișat peste Waze),
+              // 2) textul ferestrei active, 3) OCR pe captură de ecran, cât timp aplicațiile de șofer sunt active
+              private fun scan() {
                   val now = SystemClock.uptimeMillis()
                   if (now - lastScan < 300) return
                   lastScan = now
+
+                  var driverWindow = false
+                  try {
+                      for (w in windows) {
+                          val r = w.root ?: continue
+                          val p = r.packageName?.toString()
+                          if (p == Parser.UBER || p == Parser.BOLT) {
+                              driverWindow = true
+                              val lines = ArrayList<String>()
+                              collect(r, lines, 0)
+                              if (handleText(lines.joinToString("\n"))) return
+                          }
+                      }
+                  } catch (e: Exception) {
+                      Log.e(tag, "windows: $e")
+                  }
 
                   val root = rootInActiveWindow
                   if (root != null) {
                       val lines = ArrayList<String>()
                       collect(root, lines, 0)
-                      if (handleText(pkg, lines.joinToString("\n"))) return
+                      if (handleText(lines.joinToString("\n"))) return
                   }
-                  ocr(pkg)
+
+                  if (driverWindow || now - lastAppAt < 25000) ocr()
               }
 
-              private fun handleText(pkg: String, text: String): Boolean {
+              private fun handleText(text: String): Boolean {
                   var parsed: Offer? = null
                   try {
                       parsed = Parser.parseAny(text)
@@ -492,11 +507,11 @@ jobs:
                   return true
               }
 
-              private fun ocr(pkg: String) {
+              private fun ocr() {
                   if (Build.VERSION.SDK_INT < 30) return
                   if (ocrBusy) return
                   val now = SystemClock.uptimeMillis()
-                  if (now - lastOcr < 1300) return
+                  if (now - lastOcr < 800) return
                   lastOcr = now
                   ocrBusy = true
 
@@ -519,7 +534,7 @@ jobs:
                               recognizer.process(InputImage.fromBitmap(sw, 0))
                                   .addOnSuccessListener { t ->
                                       Log.d(tag, "OCR: " + t.text.replace("\n", " | "))
-                                      handleText(pkg, t.text)
+                                      handleText(t.text)
                                   }
                                   .addOnFailureListener { e -> Log.e(tag, "ocr: $e") }
                                   .addOnCompleteListener { ocrBusy = false }
@@ -635,6 +650,103 @@ jobs:
               }
           }
           EOF
+          cat > icon.b64 <<'EOF'
+          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
+          rkJggg==
+          EOF
+          base64 -d icon.b64 > app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          rm icon.b64
           find . -path ./.git -prune -o -type f -print | sort
 
       - uses: actions/setup-java@v4
@@ -651,5 +763,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: FCM APP-apk
+          name: CalculatorCursa-apk
           path: app/build/outputs/apk/debug/app-debug.apk
