@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 7
-                  versionName = "2.0"
+                  versionCode = 8
+                  versionName = "2.1"
               }
 
               compileOptions {
@@ -73,6 +73,7 @@ jobs:
 
           dependencies {
               implementation("com.google.mlkit:text-recognition:16.0.1")
+              implementation("androidx.core:core-ktx:1.13.1")
           }
           EOF
           cat > app/src/main/AndroidManifest.xml <<'EOF'
@@ -99,6 +100,16 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+
+                  <provider
+                      android:name="androidx.core.content.FileProvider"
+                      android:authorities="ro.calculatorcursa.files"
+                      android:exported="false"
+                      android:grantUriPermissions="true">
+                      <meta-data
+                          android:name="android.support.FILE_PROVIDER_PATHS"
+                          android:resource="@xml/file_paths" />
+                  </provider>
 
                   <service
                       android:name=".ShiftService"
@@ -131,6 +142,12 @@ jobs:
               android:notificationTimeout="100"
               android:packageNames="ee.mtakso.driver,com.ubercab.driver"
               android:description="@string/service_desc" />
+          EOF
+          cat > app/src/main/res/xml/file_paths.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <paths>
+              <cache-path name="cache" path="." />
+          </paths>
           EOF
           cat > app/src/main/res/values/strings.xml <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -541,14 +558,150 @@ jobs:
               }
           }
           EOF
+          cat > app/src/main/java/ro/calculatorcursa/ReceiptParser.kt <<'EOF'
+          package ro.calculatorcursa
+
+          import java.util.Calendar
+
+          data class Receipt(val liters: Double?, val price: Double?, val total: Double?, val date: Long?, val sure: Boolean)
+
+          // Extrage litrii, prețul/l, totalul și data dintr-un text citit (OCR) de pe bonul de la benzinărie.
+          // Verifică relația litri × preț ≈ total, ca să nu se bazeze doar pe cuvintele de pe bon.
+          object ReceiptParser {
+
+              private class Num(val v: Double, val line: Int)
+
+              private val numRe = Regex("""(?<![\d.,])(\d{1,4}[.,]\d{1,3})(?![\d.,])""")
+              private val dateRe = Regex("""(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})(?!\d)""")
+              private val timeRe = Regex("""\d{1,2}:\d{2}(:\d{2})?""")
+              private val totRe = Regex("""total|de plata|plata|plătit|platit""")
+              private val litRe = Regex("""\bl\b|litri|litru|ltr|gpl|cant|qty|\d\s*l\b""")
+              private val prRe = Regex("""pret|preț|p\.u|/\s*l\b|lei/l|ron/l|\bpu\b""")
+
+              private fun toDate(m: MatchResult): Long? {
+                  val d = m.groupValues[1].toIntOrNull() ?: return null
+                  val mo = m.groupValues[2].toIntOrNull() ?: return null
+                  var y = m.groupValues[3].toIntOrNull() ?: return null
+                  if (y < 100) y += 2000
+                  if (d < 1 || d > 31 || mo < 1 || mo > 12 || y < 2015 || y > 2100) return null
+                  val c = Calendar.getInstance()
+                  c.clear()
+                  c.set(y, mo - 1, d, 0, 0, 0)
+                  return c.timeInMillis
+              }
+
+              fun parse(text: String): Receipt {
+                  val lines = text.split('\n')
+                  val low = lines.map { it.lowercase() }
+                  var date: Long? = null
+                  val nums = ArrayList<Num>()
+                  for (i in lines.indices) {
+                      var line = lines[i]
+                      val dm = dateRe.find(line)
+                      if (dm != null) {
+                          if (date == null) date = toDate(dm)
+                          line = line.replace(dateRe, " ")
+                      }
+                      line = line.replace(timeRe, " ")
+                      for (m in numRe.findAll(line)) {
+                          val v = m.groupValues[1].replace(',', '.').toDoubleOrNull()
+                          if (v != null) nums.add(Num(v, i))
+                      }
+                  }
+
+                  fun near(i: Int, re: Regex): Boolean {
+                      if (i in low.indices && re.containsMatchIn(low[i])) return true
+                      if (i - 1 in low.indices && re.containsMatchIn(low[i - 1])) return true
+                      return false
+                  }
+
+                  // 1) caută triplete litri × preț = total
+                  var bl: Num? = null
+                  var bp: Num? = null
+                  var bt: Num? = null
+                  var bestScore = -1.0
+                  for (l in nums) {
+                      if (l.v < 3.0 || l.v > 120.0) continue
+                      for (p in nums) {
+                          if (p === l) continue
+                          if (p.v < 1.5 || p.v > 20.0) continue
+                          for (t in nums) {
+                              if (t === l || t === p) continue
+                              if (t.v < 5.0 || t.v > 1500.0) continue
+                              val tol = 0.03 * t.v + 0.06
+                              val diff = Math.abs(l.v * p.v - t.v)
+                              if (diff > tol) continue
+                              var s = 1.0 - diff / tol
+                              if (near(t.line, totRe)) s += 2.0
+                              if (near(l.line, litRe)) s += 1.0
+                              if (near(p.line, prRe)) s += 1.0
+                              if (p.v >= 2.0 && p.v <= 9.0) s += 0.5
+                              if (l.v > p.v) s += 0.5
+                              s += t.v / 100000.0
+                              if (s > bestScore) {
+                                  bestScore = s
+                                  bl = l
+                                  bp = p
+                                  bt = t
+                              }
+                          }
+                      }
+                  }
+                  if (bl != null && bp != null && bt != null) {
+                      return Receipt(bl.v, bp.v, bt.v, date, true)
+                  }
+
+                  // 2) fără verificare: ce se găsește lângă cuvintele cheie
+                  var total: Double? = null
+                  for (n in nums) {
+                      if (n.v >= 5.0 && n.v <= 1500.0 && near(n.line, totRe)) {
+                          if (total == null || n.v > total) total = n.v
+                      }
+                  }
+                  var liters: Double? = null
+                  for (n in nums) {
+                      if (n.v >= 3.0 && n.v <= 120.0 && n.v != total && near(n.line, litRe)) {
+                          liters = n.v
+                          break
+                      }
+                  }
+                  var price: Double? = null
+                  for (n in nums) {
+                      if (n.v >= 1.5 && n.v <= 20.0 && n.v != liters && near(n.line, prRe)) {
+                          price = n.v
+                          break
+                      }
+                  }
+                  if (total == null && liters != null && price != null) {
+                      total = Math.round(liters * price * 100.0) / 100.0
+                  }
+                  if (liters == null && total != null && price != null && price > 0.0) {
+                      liters = Math.round(total / price * 100.0) / 100.0
+                  }
+                  return Receipt(liters, price, total, date, false)
+              }
+          }
+          EOF
           cat > app/src/main/java/ro/calculatorcursa/MainActivity.kt <<'EOF'
           package ro.calculatorcursa
 
           import android.Manifest
           import android.app.Activity
+          import android.content.ClipData
           import android.content.Intent
           import android.content.pm.PackageManager
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Matrix
           import android.location.LocationManager
+          import android.media.ExifInterface
+          import android.net.Uri
+          import android.provider.MediaStore
+          import androidx.core.content.FileProvider
+          import com.google.mlkit.vision.common.InputImage
+          import com.google.mlkit.vision.text.TextRecognition
+          import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+          import java.io.File
           import android.os.Build
           import android.os.Bundle
           import android.os.Handler
@@ -577,6 +730,13 @@ jobs:
               private var live: Runnable? = null
               private var tab = 0
               private val loc = Locale("ro", "RO")
+              private var pendL = ""
+              private var pendT = ""
+              private var pendP = ""
+              private var pendD = ""
+              private var pendNote = ""
+              private var rawText = ""
+              private val recognizer by lazy { TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS) }
 
               private fun dp(v: Int): Int = Ui.dp(this, v)
 
@@ -910,11 +1070,20 @@ jobs:
                   val sdf = SimpleDateFormat("dd.MM.yyyy", loc)
                   val form = Ui.card(this)
                   form.addView(Ui.text(this, "BON NOU", 12f, Ui.MUTED, true))
+                  form.addView(Ui.button(this, "Fotografiază bonul", false) { takePhoto() })
+                  form.addView(Ui.button(this, "Alege poza din galerie", false) { pickPhoto() })
+                  if (pendNote.isNotEmpty()) {
+                      val n = Ui.text(this, pendNote, 13f, Ui.ACCENT)
+                      n.setPadding(0, dp(8), 0, 0)
+                      form.addView(n)
+                  }
                   val inL = Ui.input(this, "Litri alimentați", true)
                   val inT = Ui.input(this, "Total pe bon (lei)", true)
                   val inO = Ui.input(this, "Km de bord (opțional)", true)
                   val inD = Ui.input(this, "Data (zz.ll.aaaa)", false)
-                  inD.setText(sdf.format(Date()))
+                  inD.setText(if (pendD.isNotEmpty()) pendD else sdf.format(Date()))
+                  if (pendL.isNotEmpty()) inL.setText(pendL)
+                  if (pendT.isNotEmpty()) inT.setText(pendT)
                   form.addView(inL, Ui.lp(this, 8, 10))
                   form.addView(inT, Ui.lp(this, 8))
                   form.addView(inO, Ui.lp(this, 8))
@@ -935,10 +1104,22 @@ jobs:
                           Toast.makeText(this, "Data trebuie să fie zz.ll.aaaa", Toast.LENGTH_SHORT).show()
                       } else {
                           Store.addFill(this, d.time, l, t, o)
+                          pendL = ""
+                          pendT = ""
+                          pendP = ""
+                          pendD = ""
+                          pendNote = ""
+                          rawText = ""
                           Toast.makeText(this, "Bon salvat", Toast.LENGTH_SHORT).show()
                           show(1)
                       }
                   })
+                  if (rawText.isNotEmpty()) {
+                      val rt = Ui.text(this, "Text citit din poză:\n" + rawText, 11f, Ui.MUTED)
+                      rt.setTextIsSelectable(true)
+                      rt.setPadding(0, dp(10), 0, 0)
+                      form.addView(rt)
+                  }
                   col.addView(form)
 
                   // lista bonurilor
@@ -959,6 +1140,114 @@ jobs:
                       })
                   }
                   col.addView(list)
+              }
+
+              // ---------------- citire bon din poză ----------------
+
+              private fun takePhoto() {
+                  try {
+                      val f = File(cacheDir, "bon.jpg")
+                      if (f.exists()) f.delete()
+                      val uri = FileProvider.getUriForFile(this, "ro.calculatorcursa.files", f)
+                      val i = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                      i.putExtra(MediaStore.EXTRA_OUTPUT, uri)
+                      i.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION or Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                      i.clipData = ClipData.newRawUri("", uri)
+                      startActivityForResult(i, 11)
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Nu pot deschide camera. Folosește „Alege poza din galerie”.", Toast.LENGTH_LONG).show()
+                  }
+              }
+
+              private fun pickPhoto() {
+                  try {
+                      val i = Intent(Intent.ACTION_GET_CONTENT)
+                      i.type = "image/*"
+                      startActivityForResult(Intent.createChooser(i, "Alege poza bonului"), 12)
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Nu pot deschide galeria", Toast.LENGTH_LONG).show()
+                  }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (resultCode != RESULT_OK) return
+                  var uri: Uri? = null
+                  if (requestCode == 11) {
+                      uri = Uri.fromFile(File(cacheDir, "bon.jpg"))
+                  } else if (requestCode == 12) {
+                      uri = data?.data
+                  }
+                  if (uri != null) readReceipt(uri)
+              }
+
+              private fun loadBitmap(uri: Uri): Bitmap? {
+                  try {
+                      val o = BitmapFactory.Options()
+                      o.inJustDecodeBounds = true
+                      contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
+                      var sample = 1
+                      while (maxOf(o.outWidth, o.outHeight) / sample > 3000) sample *= 2
+                      val o2 = BitmapFactory.Options()
+                      o2.inSampleSize = sample
+                      var bmp: Bitmap? = null
+                      contentResolver.openInputStream(uri)?.use { bmp = BitmapFactory.decodeStream(it, null, o2) }
+                      val b = bmp ?: return null
+                      var deg = 0
+                      try {
+                          contentResolver.openInputStream(uri)?.use {
+                              val ex = ExifInterface(it)
+                              val ori = ex.getAttributeInt(ExifInterface.TAG_ORIENTATION, 1)
+                              deg = if (ori == 6) 90 else if (ori == 3) 180 else if (ori == 8) 270 else 0
+                          }
+                      } catch (e: Exception) {
+                      }
+                      if (deg == 0) return b
+                      val m = Matrix()
+                      m.postRotate(deg.toFloat())
+                      return Bitmap.createBitmap(b, 0, 0, b.width, b.height, m, true)
+                  } catch (e: Exception) {
+                      return null
+                  }
+              }
+
+              private fun readReceipt(uri: Uri) {
+                  Toast.makeText(this, "Citesc bonul…", Toast.LENGTH_SHORT).show()
+                  Thread {
+                      val bmp = loadBitmap(uri)
+                      runOnUiThread {
+                          if (bmp == null) {
+                              Toast.makeText(this, "Nu am putut deschide poza", Toast.LENGTH_LONG).show()
+                          } else {
+                              recognizer.process(InputImage.fromBitmap(bmp, 0))
+                                  .addOnSuccessListener { t -> applyReceipt(t.text) }
+                                  .addOnFailureListener {
+                                      Toast.makeText(this, "Citirea a eșuat, încearcă din nou", Toast.LENGTH_LONG).show()
+                                  }
+                          }
+                      }
+                  }.start()
+              }
+
+              private fun applyReceipt(text: String) {
+                  rawText = text
+                  val r = ReceiptParser.parse(text)
+                  val l = r.liters
+                  val t = r.total
+                  val p = r.price
+                  val d = r.date
+                  pendL = if (l != null) Ui.num(l, 2) else ""
+                  pendT = if (t != null) Ui.num(t, 2) else ""
+                  pendP = if (p != null) Ui.num(p, 2) else ""
+                  pendD = if (d != null) SimpleDateFormat("dd.MM.yyyy", loc).format(Date(d)) else ""
+                  pendNote = if (l == null && t == null) {
+                      "Nu am găsit valori pe poză. Încearcă o poză dreaptă, cu lumină bună, cu tot bonul în cadru."
+                  } else if (r.sure) {
+                      "Citit din poză: " + pendL + " l × " + pendP + " lei/l = " + pendT + " lei. Verifică înainte să salvezi."
+                  } else {
+                      "Citire nesigură. Verifică și completează ce lipsește."
+                  }
+                  show(1)
               }
 
               // ---------------- fila SETĂRI ----------------
