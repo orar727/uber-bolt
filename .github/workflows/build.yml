@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 6
-                  versionName = "1.5"
+                  versionCode = 7
+                  versionName = "2.0"
               }
 
               compileOptions {
@@ -79,11 +79,17 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
               <application
                   android:allowBackup="false"
                   android:icon="@mipmap/ic_launcher"
                   android:label="@string/app_name"
-                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+                  android:theme="@android:style/Theme.Material.NoActionBar">
 
                   <activity
                       android:name=".MainActivity"
@@ -93,6 +99,11 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
+
+                  <service
+                      android:name=".ShiftService"
+                      android:exported="false"
+                      android:foregroundServiceType="location" />
 
                   <service
                       android:name=".RideAccessibilityService"
@@ -194,123 +205,818 @@ jobs:
               }
           }
           EOF
+          cat > app/src/main/java/ro/calculatorcursa/Store.kt <<'EOF'
+          package ro.calculatorcursa
+
+          import android.content.Context
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          data class Fill(val id: Long, val date: Long, val liters: Double, val total: Double, val odo: Double)
+
+          data class Shift(val id: Long, val start: Long, val end: Long, val km: Double)
+
+          object Store {
+              private fun sp(ctx: Context) = ctx.getSharedPreferences("data", Context.MODE_PRIVATE)
+
+              // ---------- bonuri GPL ----------
+              fun fills(ctx: Context): List<Fill> {
+                  val out = ArrayList<Fill>()
+                  try {
+                      val a = JSONArray(sp(ctx).getString("fills", "[]"))
+                      for (i in 0 until a.length()) {
+                          val o = a.getJSONObject(i)
+                          out.add(Fill(o.getLong("id"), o.getLong("date"), o.getDouble("l"), o.getDouble("t"), o.optDouble("odo", 0.0)))
+                      }
+                  } catch (e: Exception) {
+                  }
+                  return out.sortedByDescending { it.date }
+              }
+
+              private fun saveFills(ctx: Context, list: List<Fill>) {
+                  val a = JSONArray()
+                  for (f in list) {
+                      val o = JSONObject()
+                      o.put("id", f.id)
+                      o.put("date", f.date)
+                      o.put("l", f.liters)
+                      o.put("t", f.total)
+                      o.put("odo", f.odo)
+                      a.put(o)
+                  }
+                  sp(ctx).edit().putString("fills", a.toString()).apply()
+              }
+
+              fun addFill(ctx: Context, date: Long, liters: Double, total: Double, odo: Double) {
+                  val l = fills(ctx).toMutableList()
+                  l.add(Fill(System.currentTimeMillis(), date, liters, total, odo))
+                  saveFills(ctx, l)
+              }
+
+              fun deleteFill(ctx: Context, id: Long) {
+                  saveFills(ctx, fills(ctx).filter { it.id != id })
+              }
+
+              // ---------- ture ----------
+              fun shifts(ctx: Context): List<Shift> {
+                  val out = ArrayList<Shift>()
+                  try {
+                      val a = JSONArray(sp(ctx).getString("shifts", "[]"))
+                      for (i in 0 until a.length()) {
+                          val o = a.getJSONObject(i)
+                          out.add(Shift(o.getLong("id"), o.getLong("s"), o.getLong("e"), o.getDouble("km")))
+                      }
+                  } catch (e: Exception) {
+                  }
+                  return out.sortedByDescending { it.start }
+              }
+
+              private fun saveShifts(ctx: Context, list: List<Shift>) {
+                  val a = JSONArray()
+                  for (s in list) {
+                      val o = JSONObject()
+                      o.put("id", s.id)
+                      o.put("s", s.start)
+                      o.put("e", s.end)
+                      o.put("km", s.km)
+                      a.put(o)
+                  }
+                  sp(ctx).edit().putString("shifts", a.toString()).apply()
+              }
+
+              fun deleteShift(ctx: Context, id: Long) {
+                  saveShifts(ctx, shifts(ctx).filter { it.id != id })
+              }
+
+              // ---------- tura activă ----------
+              fun activeStart(ctx: Context): Long = sp(ctx).getLong("act_start", 0L)
+
+              fun activeKm(ctx: Context): Double = sp(ctx).getString("act_km", "0")?.toDoubleOrNull() ?: 0.0
+
+              fun setActiveKm(ctx: Context, km: Double) {
+                  sp(ctx).edit().putString("act_km", km.toString()).apply()
+              }
+
+              fun startShift(ctx: Context) {
+                  sp(ctx).edit().putLong("act_start", System.currentTimeMillis()).putString("act_km", "0").apply()
+              }
+
+              fun endShift(ctx: Context) {
+                  val s = activeStart(ctx)
+                  if (s == 0L) return
+                  val km = activeKm(ctx)
+                  val l = shifts(ctx).toMutableList()
+                  val now = System.currentTimeMillis()
+                  l.add(Shift(now, s, now, km))
+                  saveShifts(ctx, l)
+                  sp(ctx).edit().remove("act_start").remove("act_km").apply()
+              }
+          }
+          EOF
+          cat > app/src/main/java/ro/calculatorcursa/Ui.kt <<'EOF'
+          package ro.calculatorcursa
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.text.InputType
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import java.util.Locale
+
+          object Ui {
+              val BG = Color.parseColor("#10141C")
+              val SURFACE = Color.parseColor("#1A202B")
+              val LINE = Color.parseColor("#2D3544")
+              val TEXT = Color.parseColor("#EEF1F6")
+              val MUTED = Color.parseColor("#9AA4B6")
+              val ACCENT = Color.parseColor("#F2B51A")
+              val ACCENT_FG = Color.parseColor("#1A1400")
+              val GOOD = Color.parseColor("#4FD1A0")
+              val BAD = Color.parseColor("#FF7B84")
+
+              fun dp(ctx: Context, v: Int): Int = (v * ctx.resources.displayMetrics.density).toInt()
+
+              fun num(v: Double, decimals: Int): String =
+                  String.format(Locale("ro", "RO"), "%." + decimals + "f", v)
+
+              fun rounded(ctx: Context, color: Int, radiusDp: Int, strokeColor: Int = 0, strokeDp: Int = 0): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(color)
+                  g.cornerRadius = dp(ctx, radiusDp).toFloat()
+                  if (strokeDp > 0) g.setStroke(dp(ctx, strokeDp), strokeColor)
+                  return g
+              }
+
+              fun lp(ctx: Context, bottomDp: Int = 0, topDp: Int = 0): LinearLayout.LayoutParams {
+                  val p = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                  p.setMargins(0, dp(ctx, topDp), 0, dp(ctx, bottomDp))
+                  return p
+              }
+
+              fun card(ctx: Context): LinearLayout {
+                  val c = LinearLayout(ctx)
+                  c.orientation = LinearLayout.VERTICAL
+                  c.setPadding(dp(ctx, 16), dp(ctx, 14), dp(ctx, 16), dp(ctx, 14))
+                  c.background = rounded(ctx, SURFACE, 12, LINE, 1)
+                  c.layoutParams = lp(ctx, 12)
+                  return c
+              }
+
+              fun text(ctx: Context, s: String, size: Float, color: Int = TEXT, bold: Boolean = false): TextView {
+                  val t = TextView(ctx)
+                  t.text = s
+                  t.textSize = size
+                  t.setTextColor(color)
+                  if (bold) t.setTypeface(Typeface.DEFAULT_BOLD)
+                  return t
+              }
+
+              fun button(ctx: Context, label: String, primary: Boolean, onClick: () -> Unit): Button {
+                  val b = Button(ctx)
+                  b.text = label
+                  b.isAllCaps = false
+                  b.textSize = 16f
+                  b.setTypeface(Typeface.DEFAULT_BOLD)
+                  if (primary) {
+                      b.setTextColor(ACCENT_FG)
+                      b.background = rounded(ctx, ACCENT, 10)
+                  } else {
+                      b.setTextColor(TEXT)
+                      b.background = rounded(ctx, BG, 10, LINE, 1)
+                  }
+                  b.setOnClickListener { onClick() }
+                  b.layoutParams = lp(ctx, 4, 12)
+                  return b
+              }
+
+              fun input(ctx: Context, hint: String, decimal: Boolean): EditText {
+                  val e = EditText(ctx)
+                  e.hint = hint
+                  e.setHintTextColor(MUTED)
+                  e.setTextColor(TEXT)
+                  e.textSize = 17f
+                  e.inputType = if (decimal) {
+                      InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                  } else {
+                      InputType.TYPE_CLASS_TEXT
+                  }
+                  e.setSingleLine(true)
+                  e.setPadding(dp(ctx, 12), dp(ctx, 10), dp(ctx, 12), dp(ctx, 10))
+                  e.background = rounded(ctx, BG, 8, LINE, 1)
+                  return e
+              }
+          }
+          EOF
+          cat > app/src/main/java/ro/calculatorcursa/ShiftService.kt <<'EOF'
+          package ro.calculatorcursa
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.location.Location
+          import android.location.LocationListener
+          import android.location.LocationManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.IBinder
+          import android.util.Log
+          import java.util.Locale
+
+          // Numără kilometrii cu GPS-ul cât timp tura e activă (rulează ca serviciu în prim-plan, cu notificare).
+          class ShiftService : Service(), LocationListener {
+
+              private val tag = "FCM-tura"
+              private val channel = "tura"
+              private val notifId = 41
+              private var lm: LocationManager? = null
+              private var last: Location? = null
+              private var km = 0.0
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startFg()
+                  if (Store.activeStart(this) == 0L) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  km = Store.activeKm(this)
+                  last = null
+                  try {
+                      val m = getSystemService(LOCATION_SERVICE) as LocationManager
+                      lm = m
+                      m.removeUpdates(this)
+                      m.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000L, 0f, this)
+                  } catch (e: SecurityException) {
+                      Log.e(tag, "permisiune locație: $e")
+                      stopSelf()
+                      return START_NOT_STICKY
+                  } catch (e: Exception) {
+                      Log.e(tag, "gps: $e")
+                  }
+                  return START_STICKY
+              }
+
+              private fun startFg() {
+                  val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                  nm.createNotificationChannel(NotificationChannel(channel, "Tură", NotificationManager.IMPORTANCE_LOW))
+                  val n = buildNotif()
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(notifId, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
+                  } else {
+                      startForeground(notifId, n)
+                  }
+              }
+
+              private fun buildNotif(): Notification {
+                  val pi = PendingIntent.getActivity(
+                      this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return Notification.Builder(this, channel)
+                      .setContentTitle("Tură în curs")
+                      .setContentText(String.format(Locale("ro", "RO"), "%.1f km parcurși", km))
+                      .setSmallIcon(android.R.drawable.ic_menu_mylocation)
+                      .setContentIntent(pi)
+                      .setOngoing(true)
+                      .build()
+              }
+
+              override fun onLocationChanged(loc: Location) {
+                  if (Store.activeStart(this) == 0L) {
+                      stopSelf()
+                      return
+                  }
+                  if (loc.hasAccuracy() && loc.accuracy > 35f) return
+
+                  val p = last
+                  if (p == null) {
+                      last = loc
+                      return
+                  }
+                  val d = p.distanceTo(loc)
+                  val dt = (loc.time - p.time) / 1000.0
+                  if (dt <= 0.0) return
+
+                  // staționar: ignoră zgomotul GPS (punctul de referință rămâne același)
+                  if (loc.hasSpeed() && loc.speed < 0.8f && d < 25f) return
+                  // salt GPS nerealist (peste 250 km/h): ignorăm segmentul
+                  if (d / dt > 70.0) {
+                      last = loc
+                      return
+                  }
+
+                  km += d / 1000.0
+                  last = loc
+                  Store.setActiveKm(this, km)
+                  try {
+                      val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+                      nm.notify(notifId, buildNotif())
+                  } catch (e: Exception) {
+                  }
+              }
+
+              // metode necesare pe versiuni vechi de Android
+              override fun onProviderEnabled(provider: String) {}
+
+              override fun onProviderDisabled(provider: String) {}
+
+              @Deprecated("necesar pe Android sub 11")
+              override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+
+              override fun onDestroy() {
+                  try {
+                      lm?.removeUpdates(this)
+                  } catch (e: Exception) {
+                  }
+                  super.onDestroy()
+              }
+          }
+          EOF
           cat > app/src/main/java/ro/calculatorcursa/MainActivity.kt <<'EOF'
           package ro.calculatorcursa
 
+          import android.Manifest
           import android.app.Activity
           import android.content.Intent
-          import android.graphics.Typeface
+          import android.content.pm.PackageManager
+          import android.location.LocationManager
+          import android.os.Build
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
           import android.provider.Settings
-          import android.text.InputType
+          import android.view.Gravity
+          import android.view.ViewGroup
           import android.widget.Button
           import android.widget.EditText
+          import android.widget.FrameLayout
           import android.widget.LinearLayout
           import android.widget.ScrollView
           import android.widget.TextView
           import android.widget.Toast
+          import java.text.SimpleDateFormat
+          import java.util.Calendar
+          import java.util.Date
+          import java.util.Locale
 
           class MainActivity : Activity() {
 
+              private lateinit var content: FrameLayout
               private lateinit var status: TextView
-              private lateinit var diag: TextView
-              private val fields = LinkedHashMap<String, EditText>()
+              private val tabButtons = ArrayList<Button>()
+              private val handler = Handler(Looper.getMainLooper())
+              private var live: Runnable? = null
+              private var tab = 0
+              private val loc = Locale("ro", "RO")
 
-              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+              private fun dp(v: Int): Int = Ui.dp(this, v)
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  window.statusBarColor = Ui.BG
+                  window.navigationBarColor = Ui.BG
 
                   val root = LinearLayout(this)
                   root.orientation = LinearLayout.VERTICAL
-                  root.setPadding(dp(16), dp(24), dp(16), dp(32))
+                  root.setBackgroundColor(Ui.BG)
 
-                  val h = TextView(this)
-                  h.text = "FCM APP"
-                  h.textSize = 26f
-                  h.setTypeface(Typeface.DEFAULT_BOLD)
-                  root.addView(h)
-
-                  status = TextView(this)
-                  status.textSize = 15f
-                  status.setPadding(0, dp(8), 0, dp(8))
-                  root.addView(status)
-
-                  val acc = Button(this)
-                  acc.text = "Deschide setările de accesibilitate"
-                  acc.setOnClickListener {
+                  val header = LinearLayout(this)
+                  header.orientation = LinearLayout.VERTICAL
+                  header.setPadding(dp(16), dp(14), dp(16), dp(8))
+                  header.addView(Ui.text(this, "FCM APP", 24f, Ui.TEXT, true))
+                  status = Ui.text(this, "", 13f, Ui.MUTED)
+                  status.setPadding(0, dp(2), 0, dp(2))
+                  status.setOnClickListener {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   }
-                  root.addView(acc)
+                  header.addView(status)
+                  root.addView(header)
 
-                  val info = TextView(this)
-                  info.textSize = 13f
-                  info.text = "Activează „FCM APP” în Accesibilitate > Aplicații instalate. " +
-                      "Dacă Android blochează activarea: Setări > Aplicații > FCM APP > meniul ⋮ > Permite setări restricționate."
-                  info.setPadding(0, dp(8), 0, dp(16))
-                  root.addView(info)
+                  content = FrameLayout(this)
+                  root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-                  for ((key, label, _) in Prefs.defs) {
-                      val l = TextView(this)
-                      l.text = label
-                      l.textSize = 13f
-                      root.addView(l)
-                      val e = EditText(this)
-                      e.inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
-                      e.setText(Prefs.raw(this, key))
-                      root.addView(e)
-                      fields[key] = e
+                  val bar = LinearLayout(this)
+                  bar.orientation = LinearLayout.HORIZONTAL
+                  bar.setBackgroundColor(Ui.SURFACE)
+                  bar.setPadding(dp(8), dp(8), dp(8), dp(8))
+                  val names = listOf("Tură", "GPL", "Setări")
+                  for (i in names.indices) {
+                      val b = Button(this)
+                      b.text = names[i]
+                      b.isAllCaps = false
+                      b.textSize = 15f
+                      b.setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+                      b.setOnClickListener { show(i) }
+                      val p = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                      p.setMargins(dp(4), 0, dp(4), 0)
+                      bar.addView(b, p)
+                      tabButtons.add(b)
                   }
+                  root.addView(bar)
 
-                  val note = TextView(this)
-                  note.textSize = 12f
-                  note.text = "Bolt și Uber afișează deja suma netă, deci comisionul rămâne 0. Lei/km și lei/oră se calculează din suma încasată, ca în Uber („Est. RON/km”). Profitul = încasare − combustibil − uzură."
-                  note.setPadding(0, dp(8), 0, dp(8))
-                  root.addView(note)
-
-                  val save = Button(this)
-                  save.text = "Salvează"
-                  save.setOnClickListener {
-                      for ((k, e) in fields) Prefs.save(this, k, e.text.toString())
-                      Toast.makeText(this, "Salvat", Toast.LENGTH_SHORT).show()
-                  }
-                  root.addView(save)
-
-                  val dh = TextView(this)
-                  dh.text = "Ultima citire (pentru depanare)"
-                  dh.textSize = 13f
-                  dh.setPadding(0, dp(24), 0, dp(4))
-                  root.addView(dh)
-
-                  diag = TextView(this)
-                  diag.textSize = 11f
-                  diag.setTypeface(Typeface.MONOSPACE)
-                  diag.setTextIsSelectable(true)
-                  root.addView(diag)
-
-                  val rf = Button(this)
-                  rf.text = "Actualizează citirea"
-                  rf.setOnClickListener { refreshDiag() }
-                  root.addView(rf)
-
-                  val sv = ScrollView(this)
-                  sv.addView(root)
-                  setContentView(sv)
+                  setContentView(root)
+                  show(0)
               }
 
               override fun onResume() {
                   super.onResume()
-                  val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
-                  val on = enabled.contains(packageName)
-                  status.text = if (on) "Serviciu activ. Deschide Bolt sau Uber Driver." else "Serviciul nu este activ."
-                  refreshDiag()
+                  updateStatus()
+                  if (tab == 0) show(0)
               }
 
-              private fun refreshDiag() {
-                  val sp = getSharedPreferences("diag", MODE_PRIVATE)
-                  val a = sp.getString("arbore", "-")
-                  val o = sp.getString("ocr", "-")
-                  diag.text = "ARBORE:\n$a\n\nOCR:\n$o"
+              override fun onPause() {
+                  stopLive()
+                  super.onPause()
+              }
+
+              private fun updateStatus() {
+                  val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+                  val on = enabled.contains(packageName)
+                  status.text = if (on) "● Citirea ofertelor e activă" else "● Citirea ofertelor e oprită. Atinge aici pentru a o activa."
+                  status.setTextColor(if (on) Ui.GOOD else Ui.BAD)
+              }
+
+              private fun stopLive() {
+                  val r = live
+                  if (r != null) handler.removeCallbacks(r)
+                  live = null
+              }
+
+              private fun show(i: Int) {
+                  tab = i
+                  stopLive()
+                  content.removeAllViews()
+                  for (k in tabButtons.indices) {
+                      val b = tabButtons[k]
+                      if (k == i) {
+                          b.setTextColor(Ui.ACCENT_FG)
+                          b.background = Ui.rounded(this, Ui.ACCENT, 10)
+                      } else {
+                          b.setTextColor(Ui.TEXT)
+                          b.background = Ui.rounded(this, Ui.SURFACE, 10)
+                      }
+                  }
+                  val col = LinearLayout(this)
+                  col.orientation = LinearLayout.VERTICAL
+                  col.setPadding(dp(16), dp(8), dp(16), dp(24))
+                  when (i) {
+                      0 -> buildShift(col)
+                      1 -> buildGpl(col)
+                      else -> buildSettings(col)
+                  }
+                  val sv = ScrollView(this)
+                  sv.addView(col)
+                  content.addView(sv)
+              }
+
+              // ---------------- ajutoare ----------------
+
+              private fun startOfDay(ms: Long): Long {
+                  val c = Calendar.getInstance()
+                  c.timeInMillis = ms
+                  c.set(Calendar.HOUR_OF_DAY, 0)
+                  c.set(Calendar.MINUTE, 0)
+                  c.set(Calendar.SECOND, 0)
+                  c.set(Calendar.MILLISECOND, 0)
+                  return c.timeInMillis
+              }
+
+              private fun startOfMonth(ms: Long): Long {
+                  val c = Calendar.getInstance()
+                  c.timeInMillis = startOfDay(ms)
+                  c.set(Calendar.DAY_OF_MONTH, 1)
+                  return c.timeInMillis
+              }
+
+              private fun fmtDur(ms: Long): String {
+                  val m = ms / 60000
+                  return "" + (m / 60) + "h " + (m % 60).toString().padStart(2, '0') + "m"
+              }
+
+              private fun stat(value: String, label: String, color: Int): LinearLayout {
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.addView(Ui.text(this, value, 20f, color, true))
+                  l.addView(Ui.text(this, label, 12f, Ui.MUTED))
+                  return l
+              }
+
+              private fun statsRow(vararg items: LinearLayout): LinearLayout {
+                  val r = LinearLayout(this)
+                  r.orientation = LinearLayout.HORIZONTAL
+                  r.setPadding(0, dp(10), 0, dp(2))
+                  for (it in items) {
+                      r.addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  }
+                  return r
+              }
+
+              private fun listRow(left: String, sub: String, onDelete: () -> Unit): LinearLayout {
+                  val r = LinearLayout(this)
+                  r.orientation = LinearLayout.HORIZONTAL
+                  r.gravity = Gravity.CENTER_VERTICAL
+                  r.setPadding(0, dp(8), 0, dp(8))
+                  val tv = LinearLayout(this)
+                  tv.orientation = LinearLayout.VERTICAL
+                  tv.addView(Ui.text(this, left, 15f))
+                  tv.addView(Ui.text(this, sub, 12f, Ui.MUTED))
+                  r.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  val d = Ui.text(this, "Șterge", 13f, Ui.BAD, true)
+                  d.setPadding(dp(12), dp(8), 0, dp(8))
+                  d.setOnClickListener { onDelete() }
+                  r.addView(d)
+                  return r
+              }
+
+              // ---------------- fila TURĂ ----------------
+
+              private fun hasLocationPermission(): Boolean =
+                  checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+              private fun startShift() {
+                  if (!hasLocationPermission()) {
+                      val list = ArrayList<String>()
+                      list.add(Manifest.permission.ACCESS_FINE_LOCATION)
+                      list.add(Manifest.permission.ACCESS_COARSE_LOCATION)
+                      if (Build.VERSION.SDK_INT >= 33) list.add(Manifest.permission.POST_NOTIFICATIONS)
+                      requestPermissions(list.toTypedArray(), 7)
+                      return
+                  }
+                  val lm = getSystemService(LOCATION_SERVICE) as LocationManager
+                  if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                      Toast.makeText(this, "Pornește locația (GPS) din setările telefonului", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  Store.startShift(this)
+                  startForegroundService(Intent(this, ShiftService::class.java))
+                  show(0)
+              }
+
+              private fun endShift() {
+                  stopService(Intent(this, ShiftService::class.java))
+                  Store.endShift(this)
+                  show(0)
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 7) {
+                      if (hasLocationPermission()) {
+                          startShift()
+                      } else {
+                          Toast.makeText(this, "Fără permisiunea de locație nu pot număra kilometrii", Toast.LENGTH_LONG).show()
+                      }
+                  }
+              }
+
+              private fun buildShift(col: LinearLayout) {
+                  val active = Store.activeStart(this) != 0L
+
+                  val c = Ui.card(this)
+                  c.addView(Ui.text(this, if (active) "TURĂ ÎN CURS" else "TURĂ", 12f, Ui.MUTED, true))
+                  val kmView = Ui.text(this, "", 44f, Ui.ACCENT, true)
+                  val timeView = Ui.text(this, "", 16f, Ui.TEXT)
+                  if (active) {
+                      c.addView(kmView)
+                      c.addView(timeView)
+                      c.addView(Ui.button(this, "Închide tura", true) { endShift() })
+                  } else {
+                      val hint = Ui.text(this, "Apasă pentru a număra kilometrii cu GPS-ul, până când închizi tura.", 14f, Ui.MUTED)
+                      hint.setPadding(0, dp(6), 0, 0)
+                      c.addView(hint)
+                      c.addView(Ui.button(this, "Începe tura", true) { startShift() })
+                  }
+                  col.addView(c)
+
+                  val shifts = Store.shifts(this)
+                  val now = System.currentTimeMillis()
+                  val dayStart = startOfDay(now)
+                  val monthStart = startOfMonth(now)
+                  var today = 0.0
+                  var month = 0.0
+                  var total = 0.0
+                  for (s in shifts) {
+                      total += s.km
+                      if (s.start >= monthStart) month += s.km
+                      if (s.start >= dayStart) today += s.km
+                  }
+                  if (active) {
+                      val k = Store.activeKm(this)
+                      total += k
+                      month += k
+                      today += k
+                  }
+                  val sum = Ui.card(this)
+                  sum.addView(Ui.text(this, "KILOMETRI", 12f, Ui.MUTED, true))
+                  sum.addView(
+                      statsRow(
+                          stat(Ui.num(today, 1), "azi", Ui.TEXT),
+                          stat(Ui.num(month, 1), "luna aceasta", Ui.TEXT),
+                          stat(Ui.num(total, 1), "total", Ui.TEXT)
+                      )
+                  )
+                  col.addView(sum)
+
+                  val recent = Ui.card(this)
+                  recent.addView(Ui.text(this, "TURE ÎNCHEIATE", 12f, Ui.MUTED, true))
+                  if (shifts.isEmpty()) {
+                      val e = Ui.text(this, "Nicio tură încă.", 14f, Ui.MUTED)
+                      e.setPadding(0, dp(8), 0, 0)
+                      recent.addView(e)
+                  }
+                  val df = SimpleDateFormat("dd.MM HH:mm", loc)
+                  for (s in shifts.take(10)) {
+                      val left = df.format(Date(s.start)) + "  •  " + Ui.num(s.km, 1) + " km"
+                      val sub = "durată " + fmtDur(s.end - s.start)
+                      recent.addView(listRow(left, sub) {
+                          Store.deleteShift(this, s.id)
+                          show(0)
+                      })
+                  }
+                  col.addView(recent)
+
+                  if (active) {
+                      val r = object : Runnable {
+                          override fun run() {
+                              val st = Store.activeStart(this@MainActivity)
+                              if (st == 0L) return
+                              kmView.text = Ui.num(Store.activeKm(this@MainActivity), 1) + " km"
+                              timeView.text = "durată " + fmtDur(System.currentTimeMillis() - st)
+                              handler.postDelayed(this, 1000)
+                          }
+                      }
+                      live = r
+                      r.run()
+                  }
+              }
+
+              // ---------------- fila GPL ----------------
+
+              private fun buildGpl(col: LinearLayout) {
+                  val fills = Store.fills(this)
+                  val monthStart = startOfMonth(System.currentTimeMillis())
+                  var spent = 0.0
+                  var liters = 0.0
+                  var month = 0.0
+                  for (f in fills) {
+                      spent += f.total
+                      liters += f.liters
+                      if (f.date >= monthStart) month += f.total
+                  }
+                  val avg = if (liters > 0.0) spent / liters else 0.0
+
+                  val sum = Ui.card(this)
+                  sum.addView(Ui.text(this, "CHELTUIT PE GPL", 12f, Ui.MUTED, true))
+                  sum.addView(Ui.text(this, Ui.num(spent, 2) + " lei", 40f, Ui.ACCENT, true))
+                  sum.addView(
+                      statsRow(
+                          stat(Ui.num(month, 2), "luna aceasta (lei)", Ui.TEXT),
+                          stat(Ui.num(liters, 1), "litri", Ui.TEXT),
+                          stat(Ui.num(avg, 2), "preț mediu /l", Ui.TEXT)
+                      )
+                  )
+
+                  // consum și cost pe km, din kilometrii de bord de la alimentări
+                  val withOdo = fills.filter { it.odo > 0.0 }.sortedBy { it.odo }
+                  var info = "Adaugă și kilometrii de bord la alimentări, ca să calculez consumul și costul pe km."
+                  if (withOdo.size >= 2) {
+                      val dist = withOdo.last().odo - withOdo.first().odo
+                      if (dist > 0.0) {
+                          var l = 0.0
+                          var t = 0.0
+                          for (i in 1 until withOdo.size) {
+                              l += withOdo[i].liters
+                              t += withOdo[i].total
+                          }
+                          info = "Consum mediu " + Ui.num(l / dist * 100.0, 1) + " l/100 km  •  cost " +
+                              Ui.num(t / dist, 2) + " lei/km (pe " + Ui.num(dist, 0) + " km)"
+                      }
+                  }
+                  val infoView = Ui.text(this, info, 13f, Ui.MUTED)
+                  infoView.setPadding(0, dp(10), 0, 0)
+                  sum.addView(infoView)
+                  col.addView(sum)
+
+                  // formular bon nou
+                  val sdf = SimpleDateFormat("dd.MM.yyyy", loc)
+                  val form = Ui.card(this)
+                  form.addView(Ui.text(this, "BON NOU", 12f, Ui.MUTED, true))
+                  val inL = Ui.input(this, "Litri alimentați", true)
+                  val inT = Ui.input(this, "Total pe bon (lei)", true)
+                  val inO = Ui.input(this, "Km de bord (opțional)", true)
+                  val inD = Ui.input(this, "Data (zz.ll.aaaa)", false)
+                  inD.setText(sdf.format(Date()))
+                  form.addView(inL, Ui.lp(this, 8, 10))
+                  form.addView(inT, Ui.lp(this, 8))
+                  form.addView(inO, Ui.lp(this, 8))
+                  form.addView(inD, Ui.lp(this, 4))
+                  form.addView(Ui.button(this, "Adaugă bonul", true) {
+                      val l = inL.text.toString().replace(',', '.').toDoubleOrNull()
+                      val t = inT.text.toString().replace(',', '.').toDoubleOrNull()
+                      val o = inO.text.toString().replace(',', '.').toDoubleOrNull() ?: 0.0
+                      sdf.isLenient = false
+                      var d: Date? = null
+                      try {
+                          d = sdf.parse(inD.text.toString().trim())
+                      } catch (e: Exception) {
+                      }
+                      if (l == null || l <= 0.0 || t == null || t <= 0.0) {
+                          Toast.makeText(this, "Completează litrii și totalul", Toast.LENGTH_SHORT).show()
+                      } else if (d == null) {
+                          Toast.makeText(this, "Data trebuie să fie zz.ll.aaaa", Toast.LENGTH_SHORT).show()
+                      } else {
+                          Store.addFill(this, d.time, l, t, o)
+                          Toast.makeText(this, "Bon salvat", Toast.LENGTH_SHORT).show()
+                          show(1)
+                      }
+                  })
+                  col.addView(form)
+
+                  // lista bonurilor
+                  val list = Ui.card(this)
+                  list.addView(Ui.text(this, "BONURI", 12f, Ui.MUTED, true))
+                  if (fills.isEmpty()) {
+                      val e = Ui.text(this, "Niciun bon încă.", 14f, Ui.MUTED)
+                      e.setPadding(0, dp(8), 0, 0)
+                      list.addView(e)
+                  }
+                  for (f in fills) {
+                      val left = sdf.format(Date(f.date)) + "  •  " + Ui.num(f.liters, 2) + " l  •  " + Ui.num(f.total, 2) + " lei"
+                      var sub = Ui.num(f.total / f.liters, 2) + " lei/l"
+                      if (f.odo > 0.0) sub += "  •  bord " + Ui.num(f.odo, 0) + " km"
+                      list.addView(listRow(left, sub) {
+                          Store.deleteFill(this, f.id)
+                          show(1)
+                      })
+                  }
+                  col.addView(list)
+              }
+
+              // ---------------- fila SETĂRI ----------------
+
+              private fun buildSettings(col: LinearLayout) {
+                  val c = Ui.card(this)
+                  c.addView(Ui.text(this, "CALCUL OFERTE", 12f, Ui.MUTED, true))
+                  val fields = LinkedHashMap<String, EditText>()
+                  for ((key, label, _) in Prefs.defs) {
+                      val l = Ui.text(this, label, 13f, Ui.MUTED)
+                      l.setPadding(0, dp(10), 0, dp(4))
+                      c.addView(l)
+                      val e = Ui.input(this, "", true)
+                      e.setText(Prefs.raw(this, key))
+                      c.addView(e, Ui.lp(this, 0))
+                      fields[key] = e
+                  }
+                  val note = Ui.text(
+                      this,
+                      "Bolt și Uber afișează deja suma netă, deci comisionul rămâne 0. Lei/km și lei/oră se calculează din suma încasată, ca în Uber. Profitul = încasare − combustibil − uzură.",
+                      12f, Ui.MUTED
+                  )
+                  note.setPadding(0, dp(10), 0, 0)
+                  c.addView(note)
+                  c.addView(Ui.button(this, "Salvează", true) {
+                      for ((k, e) in fields) Prefs.save(this, k, e.text.toString())
+                      Toast.makeText(this, "Salvat", Toast.LENGTH_SHORT).show()
+                  })
+                  col.addView(c)
+
+                  val acc = Ui.card(this)
+                  acc.addView(Ui.text(this, "CITIREA OFERTELOR", 12f, Ui.MUTED, true))
+                  val info = Ui.text(
+                      this,
+                      "Activează „FCM APP” în Accesibilitate > Aplicații instalate. Dacă Android blochează activarea: Setări > Aplicații > FCM APP > meniul ⋮ > Permite setări restricționate.",
+                      13f, Ui.MUTED
+                  )
+                  info.setPadding(0, dp(6), 0, 0)
+                  acc.addView(info)
+                  acc.addView(Ui.button(this, "Deschide setările de accesibilitate", false) {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  })
+                  col.addView(acc)
+
+                  val dg = Ui.card(this)
+                  dg.addView(Ui.text(this, "ULTIMA CITIRE (DEPANARE)", 12f, Ui.MUTED, true))
+                  val diag = Ui.text(this, "", 11f, Ui.TEXT)
+                  diag.setTypeface(android.graphics.Typeface.MONOSPACE)
+                  diag.setTextIsSelectable(true)
+                  diag.setPadding(0, dp(8), 0, 0)
+                  dg.addView(diag)
+                  val fill = {
+                      val sp = getSharedPreferences("diag", MODE_PRIVATE)
+                      diag.text = "ARBORE:\n" + sp.getString("arbore", "-") + "\n\nOCR:\n" + sp.getString("ocr", "-")
+                  }
+                  fill()
+                  dg.addView(Ui.button(this, "Actualizează citirea", false) { fill() })
+                  col.addView(dg)
               }
           }
           EOF
