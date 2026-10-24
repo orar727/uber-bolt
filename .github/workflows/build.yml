@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 5
-                  versionName = "1.4"
+                  versionCode = 6
+                  versionName = "1.5"
               }
 
               compileOptions {
@@ -213,6 +213,7 @@ jobs:
           class MainActivity : Activity() {
 
               private lateinit var status: TextView
+              private lateinit var diag: TextView
               private val fields = LinkedHashMap<String, EditText>()
 
               private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
@@ -275,6 +276,23 @@ jobs:
                   }
                   root.addView(save)
 
+                  val dh = TextView(this)
+                  dh.text = "Ultima citire (pentru depanare)"
+                  dh.textSize = 13f
+                  dh.setPadding(0, dp(24), 0, dp(4))
+                  root.addView(dh)
+
+                  diag = TextView(this)
+                  diag.textSize = 11f
+                  diag.setTypeface(Typeface.MONOSPACE)
+                  diag.setTextIsSelectable(true)
+                  root.addView(diag)
+
+                  val rf = Button(this)
+                  rf.text = "Actualizează citirea"
+                  rf.setOnClickListener { refreshDiag() }
+                  root.addView(rf)
+
                   val sv = ScrollView(this)
                   sv.addView(root)
                   setContentView(sv)
@@ -285,6 +303,14 @@ jobs:
                   val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
                   val on = enabled.contains(packageName)
                   status.text = if (on) "Serviciu activ. Deschide Bolt sau Uber Driver." else "Serviciul nu este activ."
+                  refreshDiag()
+              }
+
+              private fun refreshDiag() {
+                  val sp = getSharedPreferences("diag", MODE_PRIVATE)
+                  val a = sp.getString("arbore", "-")
+                  val o = sp.getString("ocr", "-")
+                  diag.text = "ARBORE:\n$a\n\nOCR:\n$o"
               }
           }
           EOF
@@ -297,7 +323,9 @@ jobs:
               val pickupMin: Double,
               val pickupKm: Double,
               val tripMin: Double,
-              val tripKm: Double
+              val tripKm: Double,
+              // true când citirea a trecut o verificare încrucișată (Uber: "Est. x RON/km" = suma ÷ km total)
+              val verified: Boolean = true
           )
 
           object Parser {
@@ -309,9 +337,10 @@ jobs:
               private val boltLeg = Regex("""(\d+)\s*min\W{0,6}(\d+(?:[.,]\d+)?)\s*km""", RegexOption.IGNORE_CASE)
 
               // Uber: "37,78 RON", "+8,05 RON pentru preluare", "La 2 min. (0.6 km) distanță", "Cursă: 29 min. (16.3 km)"
-              private val uberFare = Regex("""(?<![+\d.,])(\d[\d.]*[,.]\d{2})\s*RON(?!\s*/)""", RegexOption.IGNORE_CASE)
-              private val uberPickup = Regex("""\b[LI]a\s+(\d+)\s*min\.?\s*\(\s*(\d+(?:[.,]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
-              private val uberTrip = Regex("""Curs\S{0,2}\s*:?\s*(\d+)\s*min\.?\s*\(\s*(\d+(?:[.,]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
+              private val uberFare = Regex("""(?<![+\d.,])(\d[\d.]*[,.]\d{2})\s*R[O0]N(?!\s*/)""", RegexOption.IGNORE_CASE)
+              // "La 5 min. (2.5 km)", "Cursă: 10 min. (5.5 km)", "Cursă: 1 h 5 min. (45.2 km)"; primul = ridicare, al doilea = cursă
+              private val uberLeg = Regex("""(?:(\d+)\s*h\s*)?(\d+)\s*min\.?\s*\(\s*(\d+(?:[.,]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
+              private val uberEst = Regex("""Est\.?\s*(\d+(?:[.,]\d+)?)\s*R[O0]N\s*/\s*km""", RegexOption.IGNORE_CASE)
 
               fun num(s: String): Double? {
                   var t = s.trim()
@@ -362,15 +391,25 @@ jobs:
                   return Offer("Bolt", fare, pMin, pKm, tMin, tKm)
               }
 
+              private fun legMinutes(m: MatchResult): Double? {
+                  val mi = num(m.groupValues[2]) ?: return null
+                  val h = if (m.groupValues[1].isEmpty()) 0.0 else (num(m.groupValues[1]) ?: 0.0)
+                  return mi + h * 60.0
+              }
+
               private fun parseUber(text: String): Offer? {
                   val fare = biggest(uberFare, text) ?: return null
-                  val p = uberPickup.find(text) ?: return null
-                  val t = uberTrip.find(text) ?: return null
-                  val pMin = num(p.groupValues[1]) ?: return null
-                  val pKm = num(p.groupValues[2]) ?: return null
-                  val tMin = num(t.groupValues[1]) ?: return null
-                  val tKm = num(t.groupValues[2]) ?: return null
-                  return Offer("Uber", fare, pMin, pKm, tMin, tKm)
+                  val legs = uberLeg.findAll(text).toList()
+                  if (legs.size < 2) return null
+                  val pMin = legMinutes(legs[0]) ?: return null
+                  val pKm = num(legs[0].groupValues[3]) ?: return null
+                  val tMin = legMinutes(legs[1]) ?: return null
+                  val tKm = num(legs[1].groupValues[3]) ?: return null
+                  val total = pKm + tKm
+                  if (total <= 0.0) return null
+                  val est = uberEst.find(text)?.groupValues?.get(1)?.let { num(it) }
+                  val verified = est != null && Math.abs(fare / total - est) <= 0.05
+                  return Offer("Uber", fare, pMin, pKm, tMin, tKm, verified)
               }
           }
           EOF
@@ -417,6 +456,10 @@ jobs:
               private var lastOfferAt = 0L
               private var lastAppAt = 0L
               private var lastKey = ""
+              private var pendingKey = ""
+              private var pendingCount = 0
+              private var lastDiagTree = 0L
+              private var lastDiagOcr = 0L
 
               private val recognizer by lazy {
                   TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -426,15 +469,15 @@ jobs:
                   override fun run() {
                       val now = SystemClock.uptimeMillis()
                       scan()
-                      if (overlay != null && now - lastOfferAt > 3500) removeOverlay()
-                      handler.postDelayed(this, 600)
+                      if (overlay != null && now - lastOfferAt > 3000) removeOverlay()
+                      handler.postDelayed(this, 150)
                   }
               }
 
               override fun onServiceConnected() {
                   super.onServiceConnected()
                   wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                  handler.postDelayed(tick, 600)
+                  handler.postDelayed(tick, 150)
               }
 
               override fun onInterrupt() {
@@ -455,36 +498,48 @@ jobs:
               }
 
               // 1) textul ferestrelor Bolt/Uber de pe ecran (și cardul de ofertă afișat peste Waze),
-              // 2) textul ferestrei active, 3) OCR pe captură de ecran, cât timp aplicațiile de șofer sunt active
+              // 2) OCR pe captură de ecran, cât timp aplicațiile de șofer sunt active
               private fun scan() {
                   val now = SystemClock.uptimeMillis()
-                  if (now - lastScan < 300) return
+                  if (now - lastScan < 100) return
                   lastScan = now
 
                   var driverWindow = false
+                  val lines = ArrayList<String>()
                   try {
                       for (w in windows) {
                           val r = w.root ?: continue
                           val p = r.packageName?.toString()
                           if (p == Parser.UBER || p == Parser.BOLT) {
                               driverWindow = true
-                              val lines = ArrayList<String>()
                               collect(r, lines, 0)
-                              if (handleText(lines.joinToString("\n"))) return
                           }
                       }
                   } catch (e: Exception) {
                       Log.e(tag, "windows: $e")
                   }
 
-                  val root = rootInActiveWindow
-                  if (root != null) {
-                      val lines = ArrayList<String>()
-                      collect(root, lines, 0)
-                      if (handleText(lines.joinToString("\n"))) return
+                  if (driverWindow) {
+                      val text = lines.joinToString("\n")
+                      val ok = handleText(text)
+                      if (now - lastDiagTree > 1500 && text.isNotBlank()) {
+                          lastDiagTree = now
+                          saveDiag("arbore", text, ok)
+                      }
+                      if (ok) return
                   }
 
                   if (driverWindow || now - lastAppAt < 25000) ocr()
+              }
+
+              private fun saveDiag(key: String, text: String, ok: Boolean) {
+                  try {
+                      val head = (if (ok) "OFERTĂ CITITĂ" else "fără ofertă") + " | " + System.currentTimeMillis() / 1000 % 100000
+                      getSharedPreferences("diag", MODE_PRIVATE).edit()
+                          .putString(key, head + "\n" + text.take(900))
+                          .apply()
+                  } catch (e: Exception) {
+                  }
               }
 
               private fun handleText(text: String): Boolean {
@@ -498,6 +553,16 @@ jobs:
 
                   lastOfferAt = SystemClock.uptimeMillis()
                   val key = "${offer.platform}|${offer.fare}|${offer.pickupKm}|${offer.tripKm}|${offer.tripMin}"
+
+                  // citire neverificată: o afișăm doar dacă apare identică de două ori la rând
+                  if (!offer.verified) {
+                      if (key == pendingKey) pendingCount++ else {
+                          pendingKey = key
+                          pendingCount = 1
+                      }
+                      if (pendingCount < 2) return true
+                  }
+
                   if (key == lastKey && overlay != null) return true
                   lastKey = key
 
@@ -511,30 +576,38 @@ jobs:
                   if (Build.VERSION.SDK_INT < 30) return
                   if (ocrBusy) return
                   val now = SystemClock.uptimeMillis()
-                  if (now - lastOcr < 800) return
+                  if (now - lastOcr < 700) return
                   lastOcr = now
                   ocrBusy = true
 
                   try {
                       takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
                           override fun onSuccess(result: ScreenshotResult) {
-                              var sw: Bitmap? = null
+                              var crop: Bitmap? = null
                               try {
                                   val hb = result.hardwareBuffer
                                   val hw = Bitmap.wrapHardwareBuffer(hb, result.colorSpace)
-                                  sw = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                                  val sw = hw?.copy(Bitmap.Config.ARGB_8888, false)
                                   hb.close()
+                                  if (sw != null) {
+                                      // cardul de ofertă e în partea de jos; tăiem partea de sus (banda noastră, Waze)
+                                      val top = (sw.height * 0.35).toInt()
+                                      crop = Bitmap.createBitmap(sw, 0, top, sw.width, sw.height - top)
+                                  }
                               } catch (e: Exception) {
                                   Log.e(tag, "bitmap: $e")
                               }
-                              if (sw == null) {
+                              if (crop == null) {
                                   ocrBusy = false
                                   return
                               }
-                              recognizer.process(InputImage.fromBitmap(sw, 0))
+                              recognizer.process(InputImage.fromBitmap(crop, 0))
                                   .addOnSuccessListener { t ->
-                                      Log.d(tag, "OCR: " + t.text.replace("\n", " | "))
-                                      handleText(t.text)
+                                      val ok = handleText(t.text)
+                                      if (SystemClock.uptimeMillis() - lastDiagOcr > 1500) {
+                                          lastDiagOcr = SystemClock.uptimeMillis()
+                                          saveDiag("ocr", t.text, ok)
+                                      }
                                   }
                                   .addOnFailureListener { e -> Log.e(tag, "ocr: $e") }
                                   .addOnCompleteListener { ocrBusy = false }
@@ -553,6 +626,7 @@ jobs:
 
               private fun collect(n: AccessibilityNodeInfo?, out: MutableList<String>, depth: Int) {
                   if (n == null || depth > 40) return
+                  if (!n.isVisibleToUser) return
                   val t = n.text
                   if (t != null && t.isNotBlank()) {
                       out.add(t.toString())
