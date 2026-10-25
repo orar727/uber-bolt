@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 9
-                  versionName = "2.2"
+                  versionCode = 10
+                  versionName = "2.3"
               }
 
               compileOptions {
@@ -233,7 +233,7 @@ jobs:
 
           data class Fill(val id: Long, val date: Long, val liters: Double, val total: Double, val odo: Double)
 
-          data class Shift(val id: Long, val start: Long, val end: Long, val km: Double, val pausedMs: Long = 0L)
+          data class Shift(val id: Long, val start: Long, val end: Long, val km: Double, val pausedMs: Long = 0L, val bolt: Double = 0.0, val uber: Double = 0.0)
 
           object Store {
               private fun sp(ctx: Context) = ctx.getSharedPreferences("data", Context.MODE_PRIVATE)
@@ -283,7 +283,7 @@ jobs:
                       val a = JSONArray(sp(ctx).getString("shifts", "[]"))
                       for (i in 0 until a.length()) {
                           val o = a.getJSONObject(i)
-                          out.add(Shift(o.getLong("id"), o.getLong("s"), o.getLong("e"), o.getDouble("km"), o.optLong("pm", 0L)))
+                          out.add(Shift(o.getLong("id"), o.getLong("s"), o.getLong("e"), o.getDouble("km"), o.optLong("pm", 0L), o.optDouble("ib", 0.0), o.optDouble("iu", 0.0)))
                       }
                   } catch (e: Exception) {
                   }
@@ -299,6 +299,8 @@ jobs:
                       o.put("e", s.end)
                       o.put("km", s.km)
                       o.put("pm", s.pausedMs)
+                      o.put("ib", s.bolt)
+                      o.put("iu", s.uber)
                       a.put(o)
                   }
                   sp(ctx).edit().putString("shifts", a.toString()).apply()
@@ -319,7 +321,23 @@ jobs:
 
               fun startShift(ctx: Context) {
                   sp(ctx).edit().putLong("act_start", System.currentTimeMillis()).putString("act_km", "0")
-                      .remove("act_pause_at").remove("act_pause_ms").remove("act_fix").apply()
+                      .remove("act_pause_at").remove("act_pause_ms").remove("act_fix").remove("act_b0").remove("act_u0").apply()
+              }
+
+              fun setStartBalance(ctx: Context, b: Double?, u: Double?) {
+                  val e = sp(ctx).edit()
+                  if (b != null) e.putString("act_b0", b.toString()) else e.remove("act_b0")
+                  if (u != null) e.putString("act_u0", u.toString()) else e.remove("act_u0")
+                  e.apply()
+              }
+
+              fun startBoltBal(ctx: Context): Double? = sp(ctx).getString("act_b0", null)?.toDoubleOrNull()
+
+              fun startUberBal(ctx: Context): Double? = sp(ctx).getString("act_u0", null)?.toDoubleOrNull()
+
+              fun setIncome(ctx: Context, id: Long, b: Double, u: Double) {
+                  val l = shifts(ctx).map { if (it.id == id) it.copy(bolt = b, uber = u) else it }
+                  saveShifts(ctx, l)
               }
 
               fun isPaused(ctx: Context): Boolean = sp(ctx).getLong("act_pause_at", 0L) != 0L
@@ -354,16 +372,21 @@ jobs:
 
               fun lastFix(ctx: Context): Long = sp(ctx).getLong("act_fix", 0L)
 
-              fun endShift(ctx: Context) {
+              // soldurile afișate în aplicații la sfârșitul turei; încasarea = sold final − sold inițial
+              fun endShift(ctx: Context, boltEnd: Double?, uberEnd: Double?) {
                   val s = activeStart(ctx)
                   if (s == 0L) return
                   resumeShift(ctx)
                   val km = activeKm(ctx)
                   val l = shifts(ctx).toMutableList()
                   val now = System.currentTimeMillis()
-                  l.add(Shift(now, s, now, km, pausedTotal(ctx)))
+                  val b0 = startBoltBal(ctx)
+                  val u0 = startUberBal(ctx)
+                  val ib = if (b0 != null && boltEnd != null) boltEnd - b0 else 0.0
+                  val iu = if (u0 != null && uberEnd != null) uberEnd - u0 else 0.0
+                  l.add(Shift(now, s, now, km, pausedTotal(ctx), ib, iu))
                   saveShifts(ctx, l)
-                  sp(ctx).edit().remove("act_start").remove("act_km").remove("act_pause_ms").remove("act_pause_at").remove("act_fix").apply()
+                  sp(ctx).edit().remove("act_start").remove("act_km").remove("act_pause_ms").remove("act_pause_at").remove("act_fix").remove("act_b0").remove("act_u0").apply()
               }
           }
           EOF
@@ -786,6 +809,7 @@ jobs:
 
           import android.Manifest
           import android.app.Activity
+          import android.app.AlertDialog
           import android.content.ClipData
           import android.content.Intent
           import android.content.pm.PackageManager
@@ -967,6 +991,59 @@ jobs:
                   return c.timeInMillis
               }
 
+              private fun startOfWeek(ms: Long): Long {
+                  val c = Calendar.getInstance()
+                  c.timeInMillis = startOfDay(ms)
+                  val back = (c.get(Calendar.DAY_OF_WEEK) + 5) % 7
+                  c.add(Calendar.DAY_OF_MONTH, -back)
+                  return c.timeInMillis
+              }
+
+              private fun parseMoney(e: EditText): Double? = e.text.toString().trim().replace(',', '.').toDoubleOrNull()
+
+              private fun twoDialog(
+                  title: String, msg: String, hintB: String, hintU: String, b0: Double?, u0: Double?,
+                  okLabel: String, skipLabel: String, onOk: (Double?, Double?) -> Unit, onSkip: () -> Unit
+              ) {
+                  val box = LinearLayout(this)
+                  box.orientation = LinearLayout.VERTICAL
+                  box.setPadding(dp(20), dp(8), dp(20), dp(8))
+                  val b = Ui.input(this, hintB, true)
+                  val u = Ui.input(this, hintU, true)
+                  if (b0 != null) b.setText(Ui.num(b0, 2))
+                  if (u0 != null) u.setText(Ui.num(u0, 2))
+                  box.addView(b, Ui.lp(this, 8, 8))
+                  box.addView(u, Ui.lp(this, 0))
+                  val d = AlertDialog.Builder(this)
+                  d.setTitle(title)
+                  if (msg.isNotEmpty()) d.setMessage(msg)
+                  d.setView(box)
+                  d.setCancelable(false)
+                  d.setPositiveButton(okLabel) { _, _ -> onOk(parseMoney(b), parseMoney(u)) }
+                  d.setNegativeButton(skipLabel) { _, _ -> onSkip() }
+                  d.show()
+              }
+
+              private fun cell(t: String, bold: Boolean, color: Int, w: Float, right: Boolean): TextView {
+                  val v = Ui.text(this, t, 13f, color, bold)
+                  v.gravity = if (right) Gravity.END else Gravity.START
+                  v.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w)
+                  return v
+              }
+
+              private fun tableRow(label: String, km: String, inc: String, gpl: String, profit: String, header: Boolean, profitColor: Int): LinearLayout {
+                  val r = LinearLayout(this)
+                  r.orientation = LinearLayout.HORIZONTAL
+                  r.setPadding(0, dp(7), 0, dp(7))
+                  val c = if (header) Ui.MUTED else Ui.TEXT
+                  r.addView(cell(label, !header, c, 1.4f, false))
+                  r.addView(cell(km, false, c, 1f, true))
+                  r.addView(cell(inc, false, c, 1f, true))
+                  r.addView(cell(gpl, false, c, 1f, true))
+                  r.addView(cell(profit, !header, if (header) Ui.MUTED else profitColor, 1f, true))
+                  return r
+              }
+
               private fun fmtDur(ms: Long): String {
                   val m = ms / 60000
                   return "" + (m / 60) + "h " + (m % 60).toString().padStart(2, '0') + "m"
@@ -990,7 +1067,7 @@ jobs:
                   return r
               }
 
-              private fun listRow(left: String, sub: String, onDelete: () -> Unit): LinearLayout {
+              private fun listRow(left: String, sub: String, onEdit: (() -> Unit)?, onDelete: () -> Unit): LinearLayout {
                   val r = LinearLayout(this)
                   r.orientation = LinearLayout.HORIZONTAL
                   r.gravity = Gravity.CENTER_VERTICAL
@@ -999,6 +1076,7 @@ jobs:
                   tv.orientation = LinearLayout.VERTICAL
                   tv.addView(Ui.text(this, left, 15f))
                   tv.addView(Ui.text(this, sub, 12f, Ui.MUTED))
+                  if (onEdit != null) tv.setOnClickListener { onEdit() }
                   r.addView(tv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                   val d = Ui.text(this, "Șterge", 13f, Ui.BAD, true)
                   d.setPadding(dp(12), dp(8), 0, dp(8))
@@ -1026,7 +1104,19 @@ jobs:
                       Toast.makeText(this, "Pornește locația (GPS) din setările telefonului", Toast.LENGTH_LONG).show()
                       return
                   }
+                  twoDialog(
+                      "Începe tura",
+                      "Opțional: treci soldul/câștigurile afișate acum în aplicații. La final, diferența = banii făcuți în tură.",
+                      "Sold Bolt acum (lei)", "Sold Uber acum (lei)", null, null,
+                      "Începe", "Fără sold",
+                      { b, u -> doStart(b, u) },
+                      { doStart(null, null) }
+                  )
+              }
+
+              private fun doStart(b: Double?, u: Double?) {
                   Store.startShift(this)
+                  Store.setStartBalance(this, b, u)
                   startForegroundService(Intent(this, ShiftService::class.java))
                   askBattery()
                   show(0)
@@ -1062,8 +1152,27 @@ jobs:
 
               private fun endShift() {
                   stopService(Intent(this, ShiftService::class.java))
-                  Store.endShift(this)
-                  show(0)
+                  val b0 = Store.startBoltBal(this)
+                  val u0 = Store.startUberBal(this)
+                  val msg = if (b0 == null && u0 == null) {
+                      "Nu ai trecut solul de la început, deci încasările nu se pot calcula. Poți să le adaugi după, atingând tura din listă."
+                  } else {
+                      "Sold la început: Bolt " + (if (b0 != null) Ui.num(b0, 2) else "—") + ", Uber " + (if (u0 != null) Ui.num(u0, 2) else "—") + ". Treci soldul de acum."
+                  }
+                  twoDialog(
+                      "Închide tura • " + Ui.num(Store.activeKm(this), 1) + " km",
+                      msg,
+                      "Sold Bolt acum (lei)", "Sold Uber acum (lei)", null, null,
+                      "Închide tura", "Fără sold",
+                      { b, u ->
+                          Store.endShift(this, b, u)
+                          show(0)
+                      },
+                      {
+                          Store.endShift(this, null, null)
+                          show(0)
+                      }
+                  )
               }
 
               override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -1090,6 +1199,23 @@ jobs:
                       c.addView(kmView)
                       c.addView(timeView)
                       c.addView(gpsView)
+                      val b0 = Store.startBoltBal(this)
+                      val u0 = Store.startUberBal(this)
+                      val balText = "Sold început: Bolt " + (if (b0 != null) Ui.num(b0, 2) else "—") + " • Uber " + (if (u0 != null) Ui.num(u0, 2) else "—") + "  (atinge pentru a modifica)"
+                      val balView = Ui.text(this, balText, 12f, Ui.MUTED)
+                      balView.setPadding(0, dp(6), 0, 0)
+                      balView.setOnClickListener {
+                          twoDialog(
+                              "Sold la începutul turei", "", "Sold Bolt (lei)", "Sold Uber (lei)", b0, u0,
+                              "Salvează", "Anulează",
+                              { b, u ->
+                                  Store.setStartBalance(this, b, u)
+                                  show(0)
+                              },
+                              { }
+                          )
+                      }
+                      c.addView(balView)
                       if (paused) {
                           c.addView(Ui.button(this, "Reia tura", true) { resumeShift() })
                           c.addView(Ui.button(this, "Închide tura", false) { endShift() })
@@ -1109,29 +1235,47 @@ jobs:
                   val now = System.currentTimeMillis()
                   val dayStart = startOfDay(now)
                   val monthStart = startOfMonth(now)
-                  var today = 0.0
-                  var month = 0.0
-                  var total = 0.0
-                  for (s in shifts) {
-                      total += s.km
-                      if (s.start >= monthStart) month += s.km
-                      if (s.start >= dayStart) today += s.km
+                  val weekStart = startOfWeek(now)
+                  val fills = Store.fills(this)
+                  val starts = longArrayOf(dayStart, weekStart, monthStart, 0L)
+                  val names = listOf("Azi", "Săptămâna", "Luna", "Total")
+                  val kmS = DoubleArray(4)
+                  val incS = DoubleArray(4)
+                  val gplS = DoubleArray(4)
+                  for (sh in shifts) {
+                      for (k in 0 until 4) {
+                          if (sh.start >= starts[k]) {
+                              kmS[k] += sh.km
+                              incS[k] += sh.bolt + sh.uber
+                          }
+                      }
                   }
                   if (active) {
-                      val k = Store.activeKm(this)
-                      total += k
-                      month += k
-                      today += k
+                      val ak = Store.activeKm(this)
+                      for (k in 0 until 4) {
+                          if (Store.activeStart(this) >= starts[k]) kmS[k] += ak
+                      }
+                  }
+                  for (f in fills) {
+                      for (k in 0 until 4) {
+                          if (f.date >= starts[k]) gplS[k] += f.total
+                      }
                   }
                   val sum = Ui.card(this)
-                  sum.addView(Ui.text(this, "KILOMETRI", 12f, Ui.MUTED, true))
-                  sum.addView(
-                      statsRow(
-                          stat(Ui.num(today, 1), "azi", Ui.TEXT),
-                          stat(Ui.num(month, 1), "luna aceasta", Ui.TEXT),
-                          stat(Ui.num(total, 1), "total", Ui.TEXT)
+                  sum.addView(Ui.text(this, "STATISTICI", 12f, Ui.MUTED, true))
+                  sum.addView(tableRow("", "Km", "Încasat", "GPL", "Profit", true, Ui.MUTED))
+                  for (k in 0 until 4) {
+                      val pr = incS[k] - gplS[k]
+                      sum.addView(
+                          tableRow(
+                              names[k], Ui.num(kmS[k], 1), Ui.num(incS[k], 0), Ui.num(gplS[k], 0), Ui.num(pr, 0),
+                              false, if (pr >= 0.0) Ui.GOOD else Ui.BAD
+                          )
                       )
-                  )
+                  }
+                  val foot = Ui.text(this, "Încasat = diferența de sold (final − început). Profit = încasat − GPL din bonuri. O tură se numără în ziua în care a început.", 11f, Ui.MUTED)
+                  foot.setPadding(0, dp(8), 0, 0)
+                  sum.addView(foot)
                   col.addView(sum)
 
                   val recent = Ui.card(this)
@@ -1144,8 +1288,28 @@ jobs:
                   val df = SimpleDateFormat("dd.MM HH:mm", loc)
                   for (s in shifts.take(10)) {
                       val left = df.format(Date(s.start)) + "  •  " + Ui.num(s.km, 1) + " km"
-                      val sub = "durată " + fmtDur(s.end - s.start - s.pausedMs)
-                      recent.addView(listRow(left, sub) {
+                      val inc = s.bolt + s.uber
+                      var sub = "durată " + fmtDur(s.end - s.start - s.pausedMs)
+                      if (inc != 0.0) {
+                          sub += "  •  încasat " + Ui.num(inc, 2) + " lei"
+                          if (s.km > 0.5) sub += "  •  " + Ui.num(inc / s.km, 2) + " lei/km"
+                      } else {
+                          sub += "  •  atinge pentru a adăuga încasările"
+                      }
+                      val editAction: () -> Unit = {
+                          twoDialog(
+                              "Încasări tură", "Suma făcută în tură, pe fiecare aplicație.",
+                              "Încasat Bolt (lei)", "Încasat Uber (lei)",
+                              if (s.bolt != 0.0) s.bolt else null, if (s.uber != 0.0) s.uber else null,
+                              "Salvează", "Anulează",
+                              { b, u ->
+                                  Store.setIncome(this, s.id, b ?: 0.0, u ?: 0.0)
+                                  show(0)
+                              },
+                              { }
+                          )
+                      }
+                      recent.addView(listRow(left, sub, editAction) {
                           Store.deleteShift(this, s.id)
                           show(0)
                       })
@@ -1188,14 +1352,21 @@ jobs:
 
               private fun buildGpl(col: LinearLayout) {
                   val fills = Store.fills(this)
-                  val monthStart = startOfMonth(System.currentTimeMillis())
+                  val nowMs = System.currentTimeMillis()
+                  val monthStart = startOfMonth(nowMs)
+                  val weekStart = startOfWeek(nowMs)
+                  val dayStart = startOfDay(nowMs)
                   var spent = 0.0
                   var liters = 0.0
                   var month = 0.0
+                  var week = 0.0
+                  var day = 0.0
                   for (f in fills) {
                       spent += f.total
                       liters += f.liters
                       if (f.date >= monthStart) month += f.total
+                      if (f.date >= weekStart) week += f.total
+                      if (f.date >= dayStart) day += f.total
                   }
                   val avg = if (liters > 0.0) spent / liters else 0.0
 
@@ -1204,9 +1375,16 @@ jobs:
                   sum.addView(Ui.text(this, Ui.num(spent, 2) + " lei", 40f, Ui.ACCENT, true))
                   sum.addView(
                       statsRow(
-                          stat(Ui.num(month, 2), "luna aceasta (lei)", Ui.TEXT),
-                          stat(Ui.num(liters, 1), "litri", Ui.TEXT),
-                          stat(Ui.num(avg, 2), "preț mediu /l", Ui.TEXT)
+                          stat(Ui.num(day, 0), "azi (lei)", Ui.TEXT),
+                          stat(Ui.num(week, 0), "săptămâna (lei)", Ui.TEXT),
+                          stat(Ui.num(month, 0), "luna (lei)", Ui.TEXT)
+                      )
+                  )
+                  sum.addView(
+                      statsRow(
+                          stat(Ui.num(liters, 1), "litri în total", Ui.TEXT),
+                          stat(Ui.num(avg, 2), "preț mediu /l", Ui.TEXT),
+                          stat(Ui.num(fills.size.toDouble(), 0), "alimentări", Ui.TEXT)
                       )
                   )
 
@@ -1299,7 +1477,7 @@ jobs:
                       val left = sdf.format(Date(f.date)) + "  •  " + Ui.num(f.liters, 2) + " l  •  " + Ui.num(f.total, 2) + " lei"
                       var sub = Ui.num(f.total / f.liters, 2) + " lei/l"
                       if (f.odo > 0.0) sub += "  •  bord " + Ui.num(f.odo, 0) + " km"
-                      list.addView(listRow(left, sub) {
+                      list.addView(listRow(left, sub, null) {
                           Store.deleteFill(this, f.id)
                           show(1)
                       })
