@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 8
-                  versionName = "2.1"
+                  versionCode = 9
+                  versionName = "2.2"
               }
 
               compileOptions {
@@ -85,6 +85,8 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
               <application
                   android:allowBackup="false"
@@ -231,7 +233,7 @@ jobs:
 
           data class Fill(val id: Long, val date: Long, val liters: Double, val total: Double, val odo: Double)
 
-          data class Shift(val id: Long, val start: Long, val end: Long, val km: Double)
+          data class Shift(val id: Long, val start: Long, val end: Long, val km: Double, val pausedMs: Long = 0L)
 
           object Store {
               private fun sp(ctx: Context) = ctx.getSharedPreferences("data", Context.MODE_PRIVATE)
@@ -281,7 +283,7 @@ jobs:
                       val a = JSONArray(sp(ctx).getString("shifts", "[]"))
                       for (i in 0 until a.length()) {
                           val o = a.getJSONObject(i)
-                          out.add(Shift(o.getLong("id"), o.getLong("s"), o.getLong("e"), o.getDouble("km")))
+                          out.add(Shift(o.getLong("id"), o.getLong("s"), o.getLong("e"), o.getDouble("km"), o.optLong("pm", 0L)))
                       }
                   } catch (e: Exception) {
                   }
@@ -296,6 +298,7 @@ jobs:
                       o.put("s", s.start)
                       o.put("e", s.end)
                       o.put("km", s.km)
+                      o.put("pm", s.pausedMs)
                       a.put(o)
                   }
                   sp(ctx).edit().putString("shifts", a.toString()).apply()
@@ -315,18 +318,52 @@ jobs:
               }
 
               fun startShift(ctx: Context) {
-                  sp(ctx).edit().putLong("act_start", System.currentTimeMillis()).putString("act_km", "0").apply()
+                  sp(ctx).edit().putLong("act_start", System.currentTimeMillis()).putString("act_km", "0")
+                      .remove("act_pause_at").remove("act_pause_ms").remove("act_fix").apply()
               }
+
+              fun isPaused(ctx: Context): Boolean = sp(ctx).getLong("act_pause_at", 0L) != 0L
+
+              fun pausedTotal(ctx: Context): Long = sp(ctx).getLong("act_pause_ms", 0L)
+
+              fun pauseShift(ctx: Context) {
+                  if (!isPaused(ctx)) sp(ctx).edit().putLong("act_pause_at", System.currentTimeMillis()).apply()
+              }
+
+              fun resumeShift(ctx: Context) {
+                  val a = sp(ctx).getLong("act_pause_at", 0L)
+                  if (a != 0L) {
+                      val total = pausedTotal(ctx) + (System.currentTimeMillis() - a)
+                      sp(ctx).edit().putLong("act_pause_ms", total).remove("act_pause_at").apply()
+                  }
+              }
+
+              // timpul efectiv de lucru (fără pauze)
+              fun activeElapsed(ctx: Context): Long {
+                  val s = activeStart(ctx)
+                  if (s == 0L) return 0L
+                  val now = System.currentTimeMillis()
+                  val a = sp(ctx).getLong("act_pause_at", 0L)
+                  val cur = if (a != 0L) now - a else 0L
+                  return now - s - pausedTotal(ctx) - cur
+              }
+
+              fun setFix(ctx: Context, t: Long) {
+                  sp(ctx).edit().putLong("act_fix", t).apply()
+              }
+
+              fun lastFix(ctx: Context): Long = sp(ctx).getLong("act_fix", 0L)
 
               fun endShift(ctx: Context) {
                   val s = activeStart(ctx)
                   if (s == 0L) return
+                  resumeShift(ctx)
                   val km = activeKm(ctx)
                   val l = shifts(ctx).toMutableList()
                   val now = System.currentTimeMillis()
-                  l.add(Shift(now, s, now, km))
+                  l.add(Shift(now, s, now, km, pausedTotal(ctx)))
                   saveShifts(ctx, l)
-                  sp(ctx).edit().remove("act_start").remove("act_km").apply()
+                  sp(ctx).edit().remove("act_start").remove("act_km").remove("act_pause_ms").remove("act_pause_at").remove("act_fix").apply()
               }
           }
           EOF
@@ -444,6 +481,10 @@ jobs:
           import android.location.LocationManager
           import android.os.Build
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.PowerManager
+          import android.os.SystemClock
           import android.os.IBinder
           import android.util.Log
           import java.util.Locale
@@ -457,17 +498,20 @@ jobs:
               private var lm: LocationManager? = null
               private var last: Location? = null
               private var km = 0.0
+              private var wake: PowerManager.WakeLock? = null
+              private val handler = Handler(Looper.getMainLooper())
+              private var lastFixAt = 0L
 
-              override fun onBind(intent: Intent?): IBinder? = null
-
-              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-                  startFg()
-                  if (Store.activeStart(this) == 0L) {
-                      stopSelf()
-                      return START_NOT_STICKY
+              // dacă GPS-ul nu mai trimite poziții, repornește cererea
+              private val watchdog = object : Runnable {
+                  override fun run() {
+                      if (Store.activeStart(this@ShiftService) == 0L || Store.isPaused(this@ShiftService)) return
+                      if (SystemClock.elapsedRealtime() - lastFixAt > 20000) requestGps()
+                      handler.postDelayed(this, 15000)
                   }
-                  km = Store.activeKm(this)
-                  last = null
+              }
+
+              private fun requestGps() {
                   try {
                       val m = getSystemService(LOCATION_SERVICE) as LocationManager
                       lm = m
@@ -475,11 +519,35 @@ jobs:
                       m.requestLocationUpdates(LocationManager.GPS_PROVIDER, 2000L, 0f, this)
                   } catch (e: SecurityException) {
                       Log.e(tag, "permisiune locație: $e")
-                      stopSelf()
-                      return START_NOT_STICKY
                   } catch (e: Exception) {
                       Log.e(tag, "gps: $e")
                   }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startFg()
+                  if (Store.activeStart(this) == 0L || Store.isPaused(this)) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  km = Store.activeKm(this)
+                  last = null
+                  lastFixAt = SystemClock.elapsedRealtime()
+                  try {
+                      if (wake == null) {
+                          val pm = getSystemService(POWER_SERVICE) as PowerManager
+                          val w = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "fcm:tura")
+                          w.acquire()
+                          wake = w
+                      }
+                  } catch (e: Exception) {
+                      Log.e(tag, "wakelock: $e")
+                  }
+                  requestGps()
+                  handler.removeCallbacks(watchdog)
+                  handler.postDelayed(watchdog, 15000)
                   return START_STICKY
               }
 
@@ -508,11 +576,13 @@ jobs:
               }
 
               override fun onLocationChanged(loc: Location) {
-                  if (Store.activeStart(this) == 0L) {
+                  if (Store.activeStart(this) == 0L || Store.isPaused(this)) {
                       stopSelf()
                       return
                   }
-                  if (loc.hasAccuracy() && loc.accuracy > 35f) return
+                  lastFixAt = SystemClock.elapsedRealtime()
+                  Store.setFix(this, System.currentTimeMillis())
+                  if (loc.hasAccuracy() && loc.accuracy > 60f) return
 
                   val p = last
                   if (p == null) {
@@ -550,6 +620,13 @@ jobs:
               override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
 
               override fun onDestroy() {
+                  handler.removeCallbacks(watchdog)
+                  try {
+                      val w = wake
+                      if (w != null && w.isHeld) w.release()
+                  } catch (e: Exception) {
+                  }
+                  wake = null
                   try {
                       lm?.removeUpdates(this)
                   } catch (e: Exception) {
@@ -571,10 +648,11 @@ jobs:
 
               private class Num(val v: Double, val line: Int)
 
-              private val numRe = Regex("""(?<![\d.,])(\d{1,4}[.,]\d{1,3})(?![\d.,])""")
+              private val numRe = Regex("""(?<![\d.,])(\d{1,4}[.,]\d{1,4})(?![\d.,])""")
               private val dateRe = Regex("""(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})(?!\d)""")
+              private val mulRe = Regex("""(\d{1,3}[.,]\d{1,2})\s*[xX×*]\s*(\d{1,3}[.,]\d{1,4})""")
               private val timeRe = Regex("""\d{1,2}:\d{2}(:\d{2})?""")
-              private val totRe = Regex("""total|de plata|plata|plătit|platit""")
+              private val totRe = Regex("""total(?!\s*tva)|de plata|plata|plătit|platit""")
               private val litRe = Regex("""\bl\b|litri|litru|ltr|gpl|cant|qty|\d\s*l\b""")
               private val prRe = Regex("""pret|preț|p\.u|/\s*l\b|lei/l|ron/l|\bpu\b""")
 
@@ -613,6 +691,27 @@ jobs:
                       if (i in low.indices && re.containsMatchIn(low[i])) return true
                       if (i - 1 in low.indices && re.containsMatchIn(low[i - 1])) return true
                       return false
+                  }
+
+                  // 0) rândul tipărit "4,59 X32,6797 LITRU" = preț × litri
+                  val mm = mulRe.find(text)
+                  if (mm != null) {
+                      val pr = mm.groupValues[1].replace(',', '.').toDoubleOrNull()
+                      val li = mm.groupValues[2].replace(',', '.').toDoubleOrNull()
+                      if (pr != null && li != null && pr >= 1.5 && pr <= 20.0 && li >= 3.0 && li <= 120.0) {
+                          val calc = pr * li
+                          var tot: Double? = null
+                          var bd = 1e9
+                          for (n in nums) {
+                              val dd = Math.abs(n.v - calc)
+                              if (n.v >= 5.0 && dd < bd && dd <= 0.03 * calc + 0.06) {
+                                  bd = dd
+                                  tot = n.v
+                              }
+                          }
+                          val finalTotal = tot ?: (Math.round(calc * 100.0) / 100.0)
+                          return Receipt(Math.round(li * 100.0) / 100.0, pr, finalTotal, date, true)
+                      }
                   }
 
                   // 1) caută triplete litri × preț = total
@@ -706,6 +805,7 @@ jobs:
           import android.os.Bundle
           import android.os.Handler
           import android.os.Looper
+          import android.os.PowerManager
           import android.provider.Settings
           import android.view.Gravity
           import android.view.ViewGroup
@@ -801,8 +901,18 @@ jobs:
               private fun updateStatus() {
                   val enabled = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
                   val on = enabled.contains(packageName)
-                  status.text = if (on) "● Citirea ofertelor e activă" else "● Citirea ofertelor e oprită. Atinge aici pentru a o activa."
-                  status.setTextColor(if (on) Ui.GOOD else Ui.BAD)
+                  val alive = getSharedPreferences("diag", MODE_PRIVATE).getLong("alive", 0L)
+                  val running = System.currentTimeMillis() - alive < 6000
+                  if (on && running) {
+                      status.text = "● Citirea ofertelor e activă"
+                      status.setTextColor(Ui.GOOD)
+                  } else if (on) {
+                      status.text = "● Serviciul e bifat, dar nu răspunde. Atinge aici, oprește-l și pornește-l din nou."
+                      status.setTextColor(Ui.ACCENT)
+                  } else {
+                      status.text = "● Citirea ofertelor e oprită. Atinge aici pentru a o activa."
+                      status.setTextColor(Ui.BAD)
+                  }
               }
 
               private fun stopLive() {
@@ -918,6 +1028,35 @@ jobs:
                   }
                   Store.startShift(this)
                   startForegroundService(Intent(this, ShiftService::class.java))
+                  askBattery()
+                  show(0)
+              }
+
+              private fun askBattery() {
+                  try {
+                      val pm = getSystemService(POWER_SERVICE) as PowerManager
+                      if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                          val i = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                          i.data = Uri.parse("package:" + packageName)
+                          startActivity(i)
+                      }
+                  } catch (e: Exception) {
+                  }
+              }
+
+              private fun pauseShift() {
+                  Store.pauseShift(this)
+                  stopService(Intent(this, ShiftService::class.java))
+                  show(0)
+              }
+
+              private fun resumeShift() {
+                  if (!hasLocationPermission()) {
+                      startShift()
+                      return
+                  }
+                  Store.resumeShift(this)
+                  startForegroundService(Intent(this, ShiftService::class.java))
                   show(0)
               }
 
@@ -940,15 +1079,24 @@ jobs:
 
               private fun buildShift(col: LinearLayout) {
                   val active = Store.activeStart(this) != 0L
+                  val paused = active && Store.isPaused(this)
 
                   val c = Ui.card(this)
-                  c.addView(Ui.text(this, if (active) "TURĂ ÎN CURS" else "TURĂ", 12f, Ui.MUTED, true))
-                  val kmView = Ui.text(this, "", 44f, Ui.ACCENT, true)
+                  c.addView(Ui.text(this, if (paused) "TURĂ PE PAUZĂ" else if (active) "TURĂ ÎN CURS" else "TURĂ", 12f, if (paused) Ui.BAD else Ui.MUTED, true))
+                  val kmView = Ui.text(this, "", 44f, if (paused) Ui.MUTED else Ui.ACCENT, true)
                   val timeView = Ui.text(this, "", 16f, Ui.TEXT)
+                  val gpsView = Ui.text(this, "", 13f, Ui.MUTED)
                   if (active) {
                       c.addView(kmView)
                       c.addView(timeView)
-                      c.addView(Ui.button(this, "Închide tura", true) { endShift() })
+                      c.addView(gpsView)
+                      if (paused) {
+                          c.addView(Ui.button(this, "Reia tura", true) { resumeShift() })
+                          c.addView(Ui.button(this, "Închide tura", false) { endShift() })
+                      } else {
+                          c.addView(Ui.button(this, "Pauză", false) { pauseShift() })
+                          c.addView(Ui.button(this, "Închide tura", true) { endShift() })
+                      }
                   } else {
                       val hint = Ui.text(this, "Apasă pentru a număra kilometrii cu GPS-ul, până când închizi tura.", 14f, Ui.MUTED)
                       hint.setPadding(0, dp(6), 0, 0)
@@ -996,7 +1144,7 @@ jobs:
                   val df = SimpleDateFormat("dd.MM HH:mm", loc)
                   for (s in shifts.take(10)) {
                       val left = df.format(Date(s.start)) + "  •  " + Ui.num(s.km, 1) + " km"
-                      val sub = "durată " + fmtDur(s.end - s.start)
+                      val sub = "durată " + fmtDur(s.end - s.start - s.pausedMs)
                       recent.addView(listRow(left, sub) {
                           Store.deleteShift(this, s.id)
                           show(0)
@@ -1010,7 +1158,24 @@ jobs:
                               val st = Store.activeStart(this@MainActivity)
                               if (st == 0L) return
                               kmView.text = Ui.num(Store.activeKm(this@MainActivity), 1) + " km"
-                              timeView.text = "durată " + fmtDur(System.currentTimeMillis() - st)
+                              timeView.text = "durată " + fmtDur(Store.activeElapsed(this@MainActivity))
+                              if (Store.isPaused(this@MainActivity)) {
+                                  gpsView.text = "GPS oprit în pauză"
+                                  gpsView.setTextColor(Ui.MUTED)
+                              } else {
+                                  val fx = Store.lastFix(this@MainActivity)
+                                  val ago = if (fx == 0L) -1L else (System.currentTimeMillis() - fx) / 1000
+                                  if (ago in 0..10) {
+                                      gpsView.text = "GPS: semnal bun"
+                                      gpsView.setTextColor(Ui.GOOD)
+                                  } else if (ago > 10) {
+                                      gpsView.text = "GPS: fără poziție de " + ago + " s"
+                                      gpsView.setTextColor(Ui.BAD)
+                                  } else {
+                                      gpsView.text = "GPS: aștept prima poziție…"
+                                      gpsView.setTextColor(Ui.MUTED)
+                                  }
+                              }
                               handler.postDelayed(this, 1000)
                           }
                       }
@@ -1221,8 +1386,8 @@ jobs:
                           } else {
                               recognizer.process(InputImage.fromBitmap(bmp, 0))
                                   .addOnSuccessListener { t -> applyReceipt(t.text) }
-                                  .addOnFailureListener {
-                                      Toast.makeText(this, "Citirea a eșuat, încearcă din nou", Toast.LENGTH_LONG).show()
+                                  .addOnFailureListener { e ->
+                                      Toast.makeText(this, "Citirea a eșuat: " + e.toString().take(80), Toast.LENGTH_LONG).show()
                                   }
                           }
                       }
@@ -1240,7 +1405,9 @@ jobs:
                   pendT = if (t != null) Ui.num(t, 2) else ""
                   pendP = if (p != null) Ui.num(p, 2) else ""
                   pendD = if (d != null) SimpleDateFormat("dd.MM.yyyy", loc).format(Date(d)) else ""
-                  pendNote = if (l == null && t == null) {
+                  pendNote = if (text.isBlank()) {
+                      "Nu am citit niciun text de pe poză. Fă poza mai aproape, cu lumină bună."
+                  } else if (l == null && t == null) {
                       "Nu am găsit valori pe poză. Încearcă o poză dreaptă, cu lumină bună, cu tot bonul în cadru."
                   } else if (r.sure) {
                       "Citit din poză: " + pendL + " l × " + pendP + " lei/l = " + pendT + " lei. Verifică înainte să salvezi."
@@ -1290,6 +1457,7 @@ jobs:
                   acc.addView(Ui.button(this, "Deschide setările de accesibilitate", false) {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   })
+                  acc.addView(Ui.button(this, "Permite rularea în fundal (baterie)", false) { askBattery() })
                   col.addView(acc)
 
                   val dg = Ui.card(this)
@@ -1301,7 +1469,7 @@ jobs:
                   dg.addView(diag)
                   val fill = {
                       val sp = getSharedPreferences("diag", MODE_PRIVATE)
-                      diag.text = "ARBORE:\n" + sp.getString("arbore", "-") + "\n\nOCR:\n" + sp.getString("ocr", "-")
+                      diag.text = "STARE:\n" + sp.getString("stat", "-") + "\n\nARBORE:\n" + sp.getString("arbore", "-") + "\n\nOCR:\n" + sp.getString("ocr", "-")
                   }
                   fill()
                   dg.addView(Ui.button(this, "Actualizează citirea", false) { fill() })
@@ -1455,6 +1623,18 @@ jobs:
               private var pendingCount = 0
               private var lastDiagTree = 0L
               private var lastDiagOcr = 0L
+              private var lastLoose = 0L
+              private var lastStat = 0L
+              private var ocrStart = 0L
+              private var nScan = 0
+              private var nUberWin = 0
+              private var nBoltWin = 0
+              private var nOcr = 0
+              private var nOcrOk = 0
+              private var nOcrFail = 0
+              private var nOffers = 0
+              private var lastShotCode = "-"
+              private var lastErr = "-"
 
               private val recognizer by lazy {
                   TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -1464,6 +1644,7 @@ jobs:
                   override fun run() {
                       val now = SystemClock.uptimeMillis()
                       scan()
+                      saveStat()
                       if (overlay != null && now - lastOfferAt > 3000) removeOverlay()
                       handler.postDelayed(this, 150)
                   }
@@ -1500,28 +1681,49 @@ jobs:
                   lastScan = now
 
                   var driverWindow = false
+                  var uberWindow = false
                   val lines = ArrayList<String>()
+                  val roots = ArrayList<AccessibilityNodeInfo>()
                   try {
                       for (w in windows) {
                           val r = w.root ?: continue
                           val p = r.packageName?.toString()
                           if (p == Parser.UBER || p == Parser.BOLT) {
                               driverWindow = true
-                              collect(r, lines, 0)
+                              if (p == Parser.UBER) {
+                                  uberWindow = true
+                                  nUberWin++
+                              } else {
+                                  nBoltWin++
+                              }
+                              roots.add(r)
+                              collect(r, lines, 0, true)
                           }
                       }
                   } catch (e: Exception) {
                       Log.e(tag, "windows: $e")
+                      lastErr = "windows: " + e.toString().take(60)
                   }
+                  nScan++
 
                   if (driverWindow) {
                       val text = lines.joinToString("\n")
-                      val ok = handleText(text)
+                      val ok = handleText(text, false)
                       if (now - lastDiagTree > 1500 && text.isNotBlank()) {
                           lastDiagTree = now
                           saveDiag("arbore", text, ok)
                       }
                       if (ok) return
+                      // al doilea try: și nodurile pe care Android le marchează "invizibile" (card Uber), doar cu citire verificată
+                      if (uberWindow && now - lastLoose > 400) {
+                          lastLoose = now
+                          val all = ArrayList<String>()
+                          try {
+                              for (r in roots) collect(r, all, 0, false)
+                          } catch (e: Exception) {
+                          }
+                          if (handleText(all.joinToString("\n"), true)) return
+                      }
                   }
 
                   if (driverWindow || now - lastAppAt < 25000) ocr()
@@ -1537,7 +1739,7 @@ jobs:
                   }
               }
 
-              private fun handleText(text: String): Boolean {
+              private fun handleText(text: String, requireVerified: Boolean): Boolean {
                   var parsed: Offer? = null
                   try {
                       parsed = Parser.parseAny(text)
@@ -1545,6 +1747,8 @@ jobs:
                       Log.e(tag, "parse: $e")
                   }
                   val offer = parsed ?: return false
+                  if (requireVerified && !offer.verified) return false
+                  nOffers++
 
                   lastOfferAt = SystemClock.uptimeMillis()
                   val key = "${offer.platform}|${offer.fare}|${offer.pickupKm}|${offer.tripKm}|${offer.tripMin}"
@@ -1569,15 +1773,19 @@ jobs:
 
               private fun ocr() {
                   if (Build.VERSION.SDK_INT < 30) return
-                  if (ocrBusy) return
                   val now = SystemClock.uptimeMillis()
-                  if (now - lastOcr < 700) return
+                  if (ocrBusy && now - ocrStart > 4000) ocrBusy = false
+                  if (ocrBusy) return
+                  if (now - lastOcr < 400) return
                   lastOcr = now
+                  ocrStart = now
                   ocrBusy = true
+                  nOcr++
 
                   try {
                       takeScreenshot(Display.DEFAULT_DISPLAY, mainExecutor, object : TakeScreenshotCallback {
                           override fun onSuccess(result: ScreenshotResult) {
+                              lastShotCode = "ok"
                               var crop: Bitmap? = null
                               try {
                                   val hb = result.hardwareBuffer
@@ -1591,6 +1799,7 @@ jobs:
                                   }
                               } catch (e: Exception) {
                                   Log.e(tag, "bitmap: $e")
+                                  lastErr = "bitmap: " + e.toString().take(60)
                               }
                               if (crop == null) {
                                   ocrBusy = false
@@ -1598,30 +1807,54 @@ jobs:
                               }
                               recognizer.process(InputImage.fromBitmap(crop, 0))
                                   .addOnSuccessListener { t ->
-                                      val ok = handleText(t.text)
+                                      nOcrOk++
+                                      val ok = handleText(t.text, false)
                                       if (SystemClock.uptimeMillis() - lastDiagOcr > 1500) {
                                           lastDiagOcr = SystemClock.uptimeMillis()
                                           saveDiag("ocr", t.text, ok)
                                       }
                                   }
-                                  .addOnFailureListener { e -> Log.e(tag, "ocr: $e") }
+                                  .addOnFailureListener { e ->
+                                      nOcrFail++
+                                      lastErr = "ocr: " + e.toString().take(60)
+                                      Log.e(tag, "ocr: $e")
+                                  }
                                   .addOnCompleteListener { ocrBusy = false }
                           }
 
                           override fun onFailure(errorCode: Int) {
                               Log.e(tag, "screenshot eroare $errorCode")
+                              lastShotCode = "eroare $errorCode"
+                              nOcrFail++
                               ocrBusy = false
                           }
                       })
                   } catch (e: Exception) {
                       Log.e(tag, "takeScreenshot: $e")
+                      lastErr = "takeScreenshot: " + e.toString().take(60)
                       ocrBusy = false
                   }
               }
 
-              private fun collect(n: AccessibilityNodeInfo?, out: MutableList<String>, depth: Int) {
+              private fun saveStat() {
+                  val now = System.currentTimeMillis()
+                  if (now - lastStat < 1000) return
+                  lastStat = now
+                  try {
+                      val s = "scanări " + nScan + " • ferestre Uber " + nUberWin + " / Bolt " + nBoltWin +
+                          "\nOCR pornit " + nOcr + " • reușit " + nOcrOk + " • eșuat " + nOcrFail + " • captură " + lastShotCode +
+                          "\noferte citite " + nOffers + " • ultima eroare: " + lastErr
+                      getSharedPreferences("diag", MODE_PRIVATE).edit()
+                          .putLong("alive", now)
+                          .putString("stat", s)
+                          .apply()
+                  } catch (e: Exception) {
+                  }
+              }
+
+              private fun collect(n: AccessibilityNodeInfo?, out: MutableList<String>, depth: Int, visibleOnly: Boolean) {
                   if (n == null || depth > 40) return
-                  if (!n.isVisibleToUser) return
+                  if (visibleOnly && !n.isVisibleToUser) return
                   val t = n.text
                   if (t != null && t.isNotBlank()) {
                       out.add(t.toString())
@@ -1630,7 +1863,7 @@ jobs:
                       if (d != null && d.isNotBlank()) out.add(d.toString())
                   }
                   for (i in 0 until n.childCount) {
-                      collect(n.getChild(i), out, depth + 1)
+                      collect(n.getChild(i), out, depth + 1, visibleOnly)
                   }
               }
 
