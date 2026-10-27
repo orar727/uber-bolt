@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 10
-                  versionName = "2.3"
+                  versionCode = 11
+                  versionName = "2.4"
               }
 
               compileOptions {
@@ -86,6 +86,7 @@ jobs:
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
               <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
 
               <application
@@ -1666,7 +1667,9 @@ jobs:
               val tripMin: Double,
               val tripKm: Double,
               // true când citirea a trecut o verificare încrucișată (Uber: "Est. x RON/km" = suma ÷ km total)
-              val verified: Boolean = true
+              val verified: Boolean = true,
+              // adresa destinației (rândul de după a doua distanță), dacă s-a putut citi
+              val dest: String? = null
           )
 
           object Parser {
@@ -1682,6 +1685,34 @@ jobs:
               // "La 5 min. (2.5 km)", "Cursă: 10 min. (5.5 km)", "Cursă: 1 h 5 min. (45.2 km)"; primul = ridicare, al doilea = cursă
               private val uberLeg = Regex("""(?:(\d+)\s*h\s*)?(\d+)\s*min\.?\s*\(\s*(\d+(?:[.,]\d+)?)\s*km\s*\)""", RegexOption.IGNORE_CASE)
               private val uberEst = Regex("""Est\.?\s*(\d+(?:[.,]\d+)?)\s*R[O0]N\s*/\s*km""", RegexOption.IGNORE_CASE)
+
+              private val badWord = Regex("""accept|refuz|potrivire|curs[ăa]|lung[ăa]|distan|\bron\b|\blei\b|\bkm\b|\bmin\b|c[âa][șs]tig|exclusiv|\buber|\bbolt|\d+\s*%""", RegexOption.IGNORE_CASE)
+
+              // adresa scrisă după rândul unei curse ("Cursă: 15 min. (5.6 km)" → "Calea Rahovei 151, București")
+              private fun addrAfter(text: String, endIdx: Int): String? {
+                  if (endIdx >= text.length) return null
+                  val parts = text.substring(endIdx).split('\n')
+                  var out = ""
+                  var taken = 0
+                  var idx = 0
+                  for (raw in parts) {
+                      if (idx++ > 4) break
+                      val l = raw.trim().trimStart('•', '·', '-', ' ', ')')
+                      val valid = l.length >= 4 && l.any { it.isLetter() } && !badWord.containsMatchIn(l)
+                      if (!valid) {
+                          if (taken > 0) break else continue
+                      }
+                      if (taken == 0) {
+                          out = l
+                          taken = 1
+                          if (!l.endsWith(",")) break
+                      } else {
+                          out = out + " " + l
+                          break
+                      }
+                  }
+                  return if (taken > 0) out else null
+              }
 
               fun num(s: String): Double? {
                   var t = s.trim()
@@ -1729,7 +1760,7 @@ jobs:
                   val pKm = num(legs[0].groupValues[2]) ?: return null
                   val tMin = num(legs[1].groupValues[1]) ?: return null
                   val tKm = num(legs[1].groupValues[2]) ?: return null
-                  return Offer("Bolt", fare, pMin, pKm, tMin, tKm)
+                  return Offer("Bolt", fare, pMin, pKm, tMin, tKm, true, addrAfter(text, legs[1].range.last + 1))
               }
 
               private fun legMinutes(m: MatchResult): Double? {
@@ -1750,7 +1781,7 @@ jobs:
                   if (total <= 0.0) return null
                   val est = uberEst.find(text)?.groupValues?.get(1)?.let { num(it) }
                   val verified = est != null && Math.abs(fare / total - est) <= 0.05
-                  return Offer("Uber", fare, pMin, pKm, tMin, tKm, verified)
+                  return Offer("Uber", fare, pMin, pKm, tMin, tKm, verified, addrAfter(text, legs[1].range.last + 1))
               }
           }
           EOF
@@ -1761,6 +1792,17 @@ jobs:
           import android.accessibilityservice.AccessibilityService.ScreenshotResult
           import android.accessibilityservice.AccessibilityService.TakeScreenshotCallback
           import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.location.Address
+          import android.location.Geocoder
+          import android.location.LocationManager
+          import android.view.View
+          import android.widget.ImageView
+          import java.net.HttpURLConnection
+          import java.net.URL
+          import java.util.concurrent.Executors
           import android.graphics.Color
           import android.graphics.PixelFormat
           import android.graphics.Typeface
@@ -1772,6 +1814,7 @@ jobs:
           import android.util.Log
           import android.view.Display
           import android.view.Gravity
+          import android.view.ViewGroup
           import android.view.WindowManager
           import android.view.accessibility.AccessibilityEvent
           import android.view.accessibility.AccessibilityNodeInfo
@@ -1781,6 +1824,8 @@ jobs:
           import com.google.mlkit.vision.text.TextRecognition
           import com.google.mlkit.vision.text.latin.TextRecognizerOptions
           import java.util.Locale
+
+          class GeoInfo(val zone: String, val rel: String, val tile: Bitmap?)
 
           class RideAccessibilityService : AccessibilityService() {
 
@@ -1812,6 +1857,11 @@ jobs:
               private var nOcrFail = 0
               private var nOffers = 0
               private var lastShotCode = "-"
+              private var zoneView: TextView? = null
+              private var mapView: ImageView? = null
+              private var geoNorm = ""
+              private val geoCache = HashMap<String, GeoInfo?>()
+              private val bg = Executors.newSingleThreadExecutor()
               private var lastErr = "-"
 
               private val recognizer by lazy {
@@ -1940,13 +1990,170 @@ jobs:
                       if (pendingCount < 2) return true
                   }
 
-                  if (key == lastKey && overlay != null) return true
+                  if (key == lastKey && overlay != null) {
+                      maybeGeo(offer.dest)
+                      return true
+                  }
                   lastKey = key
 
                   val r = Calc.compute(this, offer)
                   Log.d(tag, "oferta=$offer rezultat=$r")
+                  geoNorm = ""
                   show(offer, r)
+                  maybeGeo(offer.dest)
                   return true
+              }
+
+              // ---------- destinația: zonă + hartă mică ----------
+
+              private fun normAddr(s: String): String = s.lowercase().filter { it.isLetterOrDigit() }
+
+              private fun maybeGeo(dest: String?) {
+                  if (dest == null || overlay == null) return
+                  val norm = normAddr(dest)
+                  if (norm == geoNorm) return
+                  geoNorm = norm
+                  zoneView?.text = "→ " + dest
+                  zoneView?.visibility = View.VISIBLE
+                  val cached = geoCache[norm]
+                  if (cached != null) {
+                      applyGeo(dest, cached)
+                      return
+                  }
+                  bg.execute {
+                      val info = lookup(dest)
+                      if (info != null) geoCache[norm] = info
+                      handler.post {
+                          if (geoNorm == norm) applyGeo(dest, info)
+                      }
+                  }
+              }
+
+              private fun applyGeo(dest: String, info: GeoInfo?) {
+                  if (overlay == null) return
+                  if (info == null) {
+                      zoneView?.text = "→ " + dest + " (loc negăsit)"
+                      return
+                  }
+                  val z = if (info.zone.isNotEmpty()) info.zone else dest
+                  zoneView?.text = "→ " + z + info.rel
+                  val t = info.tile
+                  if (t != null) {
+                      mapView?.setImageBitmap(t)
+                      mapView?.visibility = View.VISIBLE
+                  }
+              }
+
+              private fun lastLocation(): android.location.Location? {
+                  try {
+                      val m = getSystemService(LOCATION_SERVICE) as LocationManager
+                      var best: android.location.Location? = null
+                      for (p in listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER)) {
+                          val l = try {
+                              m.getLastKnownLocation(p)
+                          } catch (e: Exception) {
+                              null
+                          }
+                          if (l != null && (best == null || l.time > best.time)) best = l
+                      }
+                      return best
+                  } catch (e: Exception) {
+                      return null
+                  }
+              }
+
+              private fun lookup(dest: String): GeoInfo? {
+                  try {
+                      if (!Geocoder.isPresent()) {
+                          lastErr = "geocoder lipsă"
+                          return null
+                      }
+                      val g = Geocoder(this, Locale("ro", "RO"))
+                      val me = lastLocation()
+                      var list: List<Address>? = null
+                      if (me != null) {
+                          list = g.getFromLocationName(dest, 1, me.latitude - 0.6, me.longitude - 0.8, me.latitude + 0.6, me.longitude + 0.8)
+                      }
+                      if (list == null || list.isEmpty()) list = g.getFromLocationName(dest, 1)
+                      if (list == null || list.isEmpty()) {
+                          lastErr = "adresă negăsită"
+                          return null
+                      }
+                      val a = list[0]
+                      val parts = ArrayList<String>()
+                      for (x in listOf(a.subLocality, a.locality, a.subAdminArea)) {
+                          if (x != null && x.isNotBlank() && !parts.contains(x)) parts.add(x)
+                      }
+                      val zone = parts.joinToString(", ")
+                      var rel = ""
+                      if (me != null) {
+                          val res = FloatArray(2)
+                          android.location.Location.distanceBetween(me.latitude, me.longitude, a.latitude, a.longitude, res)
+                          val dirs = arrayOf("N", "NE", "E", "SE", "S", "SV", "V", "NV")
+                          val br = ((res[1] + 360f) % 360f)
+                          val dir = dirs[((br + 22.5f) / 45f).toInt() % 8]
+                          rel = "  •  " + String.format(Locale("ro", "RO"), "%.1f", res[0] / 1000f) + " km spre " + dir
+                      }
+                      val tile = try {
+                          buildTile(a.latitude, a.longitude)
+                      } catch (e: Exception) {
+                          lastErr = "hartă: " + e.toString().take(50)
+                          null
+                      }
+                      return GeoInfo(zone, rel, tile)
+                  } catch (e: Exception) {
+                      lastErr = "geo: " + e.toString().take(60)
+                      return null
+                  }
+              }
+
+              private fun fetchTile(z: Int, x: Int, y: Int): Bitmap? {
+                  try {
+                      val c = URL("https://tile.openstreetmap.org/" + z + "/" + x + "/" + y + ".png").openConnection() as HttpURLConnection
+                      c.connectTimeout = 2500
+                      c.readTimeout = 2500
+                      c.setRequestProperty("User-Agent", "FCM-APP/2.4 (uz personal)")
+                      val b = c.inputStream.use { BitmapFactory.decodeStream(it) }
+                      c.disconnect()
+                      return b
+                  } catch (e: Exception) {
+                      return null
+                  }
+              }
+
+              // 256×256 px în jurul destinației, cu pin
+              private fun buildTile(lat: Double, lon: Double): Bitmap? {
+                  val z = 15
+                  val n = Math.pow(2.0, z.toDouble())
+                  val px = (lon + 180.0) / 360.0 * n * 256.0
+                  val latRad = Math.toRadians(lat)
+                  val py = (1.0 - Math.log(Math.tan(latRad) + 1.0 / Math.cos(latRad)) / Math.PI) / 2.0 * n * 256.0
+                  val left = px - 128.0
+                  val top = py - 128.0
+                  val tx0 = Math.floor(left / 256.0).toInt()
+                  val ty0 = Math.floor(top / 256.0).toInt()
+                  val out = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
+                  val cv = Canvas(out)
+                  cv.drawColor(Color.parseColor("#E8EAED"))
+                  var got = 0
+                  for (ix in 0..1) {
+                      for (iy in 0..1) {
+                          val t = fetchTile(z, tx0 + ix, ty0 + iy)
+                          if (t != null) {
+                              got++
+                              cv.drawBitmap(t, ((tx0 + ix) * 256.0 - left).toFloat(), ((ty0 + iy) * 256.0 - top).toFloat(), null)
+                          }
+                      }
+                  }
+                  if (got == 0) return null
+                  val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                  p.color = Color.WHITE
+                  cv.drawCircle(128f, 128f, 17f, p)
+                  p.color = Color.parseColor("#E5252F")
+                  cv.drawCircle(128f, 128f, 12f, p)
+                  p.color = Color.WHITE
+                  cv.drawCircle(128f, 128f, 4f, p)
+                  return out
               }
 
               private fun ocr() {
@@ -2071,8 +2278,17 @@ jobs:
 
                   if (overlay == null) {
                       val box = LinearLayout(this)
-                      box.orientation = LinearLayout.VERTICAL
+                      box.orientation = LinearLayout.HORIZONTAL
+                      box.gravity = Gravity.CENTER_VERTICAL
                       box.setPadding(dp(14), dp(10), dp(14), dp(10))
+                      val mv = ImageView(this)
+                      mv.scaleType = ImageView.ScaleType.FIT_XY
+                      mv.visibility = View.GONE
+                      val mp = LinearLayout.LayoutParams(dp(96), dp(96))
+                      mp.setMargins(0, 0, dp(12), 0)
+                      box.addView(mv, mp)
+                      val colv = LinearLayout(this)
+                      colv.orientation = LinearLayout.VERTICAL
 
                       val t = TextView(this)
                       t.setTextColor(Color.WHITE)
@@ -2083,8 +2299,14 @@ jobs:
                       d.setTextColor(Color.WHITE)
                       d.textSize = 15f
 
-                      box.addView(t)
-                      box.addView(d)
+                      val zv = TextView(this)
+                      zv.setTextColor(Color.WHITE)
+                      zv.textSize = 14f
+                      zv.visibility = View.GONE
+                      colv.addView(t)
+                      colv.addView(d)
+                      colv.addView(zv)
+                      box.addView(colv, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
                       val lp = WindowManager.LayoutParams(
                           resources.displayMetrics.widthPixels - dp(32),
@@ -2103,6 +2325,8 @@ jobs:
                           overlay = box
                           title = t
                           detail = d
+                          zoneView = zv
+                          mapView = mv
                       } catch (e: Exception) {
                           Log.e(tag, "overlay: $e")
                           return
@@ -2126,6 +2350,9 @@ jobs:
                   overlay = null
                   title = null
                   detail = null
+                  zoneView = null
+                  mapView = null
+                  geoNorm = ""
                   lastKey = ""
               }
           }
