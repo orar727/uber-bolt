@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 15
-                  versionName = "2.8"
+                  versionCode = 16
+                  versionName = "2.9"
               }
 
               // cheie de semnare fixă: actualizările se instalează peste aplicația existentă, fără ștergere
@@ -1910,11 +1910,13 @@ jobs:
                   cal.add(Calendar.DAY_OF_MONTH, -1)
                   val lastDay = cal.timeInMillis
 
-                  var auto = 0.0
+                  var autoB = 0.0
+                  var autoU = 0.0
                   var km = 0.0
                   for (sh in Store.shifts(this)) {
                       if (sh.start >= ws && sh.start < we) {
-                          auto += sh.bolt + sh.uber
+                          autoB += sh.bolt
+                          autoU += sh.uber
                           km += sh.km
                       }
                   }
@@ -1951,7 +1953,7 @@ jobs:
                   nav.addView(ttl, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
                   nav.addView(next)
                   head.addView(nav)
-                  val info = Ui.text(this, "Din ture: " + Ui.num(auto, 2) + " lei încasat  •  " + Ui.num(km, 1) + " km  •  GPL " + Ui.num(gpl, 2) + " lei", 12f, Ui.MUTED)
+                  val info = Ui.text(this, "Din ture: Bolt " + Ui.num(autoB, 2) + " + Uber " + Ui.num(autoU, 2) + " lei încasat  •  " + Ui.num(km, 1) + " km  •  GPL " + Ui.num(gpl, 2) + " lei", 12f, Ui.MUTED)
                   info.setPadding(0, dp(8), 0, 0)
                   head.addView(info)
                   col.addView(head)
@@ -1963,8 +1965,10 @@ jobs:
                       l.setPadding(0, dp(10), 0, dp(4))
                       return l
                   }
-                  val inTotal = Ui.input(this, "", true)
-                  inTotal.setText(Store.wkGet(this, "total", ws) ?: Ui.num(auto, 2))
+                  val inTotB = Ui.input(this, "", true)
+                  inTotB.setText(Store.wkGet(this, "totb", ws) ?: Ui.num(autoB, 2))
+                  val inTotU = Ui.input(this, "", true)
+                  inTotU.setText(Store.wkGet(this, "totu", ws) ?: Ui.num(autoU, 2))
                   val inCom = Ui.input(this, "", true)
                   inCom.setText(Store.gGet(this, "com", "10"))
                   val inCar = Ui.input(this, "", true)
@@ -1973,11 +1977,16 @@ jobs:
                   inCashB.setText(Store.wkGet(this, "cashb", ws) ?: "")
                   val inCashU = Ui.input(this, "", true)
                   inCashU.setText(Store.wkGet(this, "cashu", ws) ?: "")
-                  form.addView(label("Suma făcută în aplicații, Bolt + Uber (lei)"))
-                  form.addView(inTotal, Ui.lp(this, 0))
-                  val reset = Ui.text(this, "Reia suma din ture (" + Ui.num(auto, 2) + ")", 12f, Ui.ACCENT, true)
+                  form.addView(label("Suma făcută pe Bolt (lei)"))
+                  form.addView(inTotB, Ui.lp(this, 0))
+                  form.addView(label("Suma făcută pe Uber (lei)"))
+                  form.addView(inTotU, Ui.lp(this, 0))
+                  val reset = Ui.text(this, "Reia sumele din ture (Bolt " + Ui.num(autoB, 2) + ", Uber " + Ui.num(autoU, 2) + ")", 12f, Ui.ACCENT, true)
                   reset.setPadding(0, dp(6), 0, 0)
-                  reset.setOnClickListener { inTotal.setText(Ui.num(auto, 2)) }
+                  reset.setOnClickListener {
+                      inTotB.setText(Ui.num(autoB, 2))
+                      inTotU.setText(Ui.num(autoU, 2))
+                  }
                   form.addView(reset)
                   form.addView(label("Comision (%)"))
                   form.addView(inCom, Ui.lp(this, 0))
@@ -1991,13 +2000,17 @@ jobs:
 
                   val out = Ui.card(this)
                   out.addView(Ui.text(this, "REZULTAT", 12f, Ui.MUTED, true))
-                  val rBrut = pairRow("Suma făcută", 15f, Ui.TEXT, false)
+                  val rTB = pairRow("Bolt", 15f, Ui.TEXT, false)
+                  val rTU = pairRow("Uber", 15f, Ui.TEXT, false)
+                  val rBrut = pairRow("Suma făcută", 15f, Ui.TEXT, true)
                   val rCom = pairRow("Comision", 15f, Ui.TEXT, false)
                   val rCar = pairRow("Mașină", 15f, Ui.TEXT, false)
                   val rNet = pairRow("Rămâne", 17f, Ui.TEXT, true)
                   val rCashB = pairRow("Cash Bolt", 15f, Ui.TEXT, false)
                   val rCashU = pairRow("Cash Uber", 15f, Ui.TEXT, false)
                   val rPay = pairRow("DE PRIMIT", 20f, Ui.ACCENT, true)
+                  out.addView(rTB.first)
+                  out.addView(rTU.first)
                   out.addView(rBrut.first)
                   out.addView(rCom.first)
                   out.addView(rCar.first)
@@ -2008,7 +2021,9 @@ jobs:
                   col.addView(out)
 
                   fun refresh() {
-                      val g = parseMoney(inTotal) ?: 0.0
+                      val gB = parseMoney(inTotB) ?: 0.0
+                      val gU = parseMoney(inTotU) ?: 0.0
+                      val g = gB + gU
                       val pct = parseMoney(inCom) ?: 0.0
                       val car = parseMoney(inCar) ?: 0.0
                       val cashB = parseMoney(inCashB) ?: 0.0
@@ -2017,6 +2032,8 @@ jobs:
                       val com = g * pct / 100.0
                       val net = g - com - car
                       val pay = net - cash
+                      rTB.second.text = Ui.num(gB, 2) + " lei"
+                      rTU.second.text = Ui.num(gU, 2) + " lei"
                       rBrut.second.text = Ui.num(g, 2) + " lei"
                       rCom.second.text = "− " + Ui.num(com, 2) + " lei (" + Ui.num(pct, 1) + "%)"
                       rCar.second.text = "− " + Ui.num(car, 2) + " lei"
@@ -2032,7 +2049,8 @@ jobs:
                       override fun beforeTextChanged(x: CharSequence?, a: Int, b: Int, c: Int) {}
                       override fun onTextChanged(x: CharSequence?, a: Int, b: Int, c: Int) {}
                       override fun afterTextChanged(x: Editable?) {
-                          Store.wkSet(this@MainActivity, "total", ws, inTotal.text.toString())
+                          Store.wkSet(this@MainActivity, "totb", ws, inTotB.text.toString())
+                          Store.wkSet(this@MainActivity, "totu", ws, inTotU.text.toString())
                           Store.gSet(this@MainActivity, "com", inCom.text.toString())
                           Store.gSet(this@MainActivity, "car", inCar.text.toString())
                           Store.wkSet(this@MainActivity, "cashb", ws, inCashB.text.toString())
@@ -2040,7 +2058,8 @@ jobs:
                           refresh()
                       }
                   }
-                  inTotal.addTextChangedListener(watcher)
+                  inTotB.addTextChangedListener(watcher)
+                  inTotU.addTextChangedListener(watcher)
                   inCom.addTextChangedListener(watcher)
                   inCar.addTextChangedListener(watcher)
                   inCashB.addTextChangedListener(watcher)
@@ -2117,7 +2136,7 @@ jobs:
                           Toast.makeText(this, "Nu pot deschide selectorul de fișiere", Toast.LENGTH_LONG).show()
                       }
                   })
-                  val ver = Ui.text(this, "FCM APP versiunea 2.8", 11f, Ui.MUTED)
+                  val ver = Ui.text(this, "FCM APP versiunea 2.9", 11f, Ui.MUTED)
                   ver.setPadding(0, dp(10), 0, 0)
                   bk.addView(ver)
                   col.addView(bk)
