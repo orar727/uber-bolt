@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 14
-                  versionName = "2.7"
+                  versionCode = 15
+                  versionName = "2.8"
               }
 
               // cheie de semnare fixă: actualizările se instalează peste aplicația existentă, fără ștergere
@@ -1973,8 +1973,6 @@ jobs:
                   inCashB.setText(Store.wkGet(this, "cashb", ws) ?: "")
                   val inCashU = Ui.input(this, "", true)
                   inCashU.setText(Store.wkGet(this, "cashu", ws) ?: "")
-                  val inBolt = Ui.input(this, "", true)
-                  inBolt.setText(Store.wkGet(this, "bolt", ws) ?: "")
                   form.addView(label("Suma făcută în aplicații, Bolt + Uber (lei)"))
                   form.addView(inTotal, Ui.lp(this, 0))
                   val reset = Ui.text(this, "Reia suma din ture (" + Ui.num(auto, 2) + ")", 12f, Ui.ACCENT, true)
@@ -1989,8 +1987,6 @@ jobs:
                   form.addView(inCashB, Ui.lp(this, 0))
                   form.addView(label("Cash în mână din comenzi Uber (lei)"))
                   form.addView(inCashU, Ui.lp(this, 0))
-                  form.addView(label("Deja primit pe Bolt (lei)"))
-                  form.addView(inBolt, Ui.lp(this, 0))
                   col.addView(form)
 
                   val out = Ui.card(this)
@@ -2001,7 +1997,6 @@ jobs:
                   val rNet = pairRow("Rămâne", 17f, Ui.TEXT, true)
                   val rCashB = pairRow("Cash Bolt", 15f, Ui.TEXT, false)
                   val rCashU = pairRow("Cash Uber", 15f, Ui.TEXT, false)
-                  val rBolt = pairRow("Deja pe Bolt", 15f, Ui.TEXT, false)
                   val rPay = pairRow("DE PRIMIT", 20f, Ui.ACCENT, true)
                   out.addView(rBrut.first)
                   out.addView(rCom.first)
@@ -2009,7 +2004,6 @@ jobs:
                   out.addView(rNet.first)
                   out.addView(rCashB.first)
                   out.addView(rCashU.first)
-                  out.addView(rBolt.first)
                   out.addView(rPay.first)
                   col.addView(out)
 
@@ -2020,10 +2014,9 @@ jobs:
                       val cashB = parseMoney(inCashB) ?: 0.0
                       val cashU = parseMoney(inCashU) ?: 0.0
                       val cash = cashB + cashU
-                      val bolt = parseMoney(inBolt) ?: 0.0
                       val com = g * pct / 100.0
                       val net = g - com - car
-                      val pay = net - cash - bolt
+                      val pay = net - cash
                       rBrut.second.text = Ui.num(g, 2) + " lei"
                       rCom.second.text = "− " + Ui.num(com, 2) + " lei (" + Ui.num(pct, 1) + "%)"
                       rCar.second.text = "− " + Ui.num(car, 2) + " lei"
@@ -2031,7 +2024,6 @@ jobs:
                       rNet.second.setTextColor(if (net >= 0.0) Ui.GOOD else Ui.BAD)
                       rCashB.second.text = "− " + Ui.num(cashB, 2) + " lei"
                       rCashU.second.text = "− " + Ui.num(cashU, 2) + " lei"
-                      rBolt.second.text = "− " + Ui.num(bolt, 2) + " lei"
                       rPay.second.text = Ui.num(pay, 2) + " lei"
                       rPay.second.setTextColor(if (pay >= 0.0) Ui.ACCENT else Ui.BAD)
                   }
@@ -2045,7 +2037,6 @@ jobs:
                           Store.gSet(this@MainActivity, "car", inCar.text.toString())
                           Store.wkSet(this@MainActivity, "cashb", ws, inCashB.text.toString())
                           Store.wkSet(this@MainActivity, "cashu", ws, inCashU.text.toString())
-                          Store.wkSet(this@MainActivity, "bolt", ws, inBolt.text.toString())
                           refresh()
                       }
                   }
@@ -2054,7 +2045,6 @@ jobs:
                   inCar.addTextChangedListener(watcher)
                   inCashB.addTextChangedListener(watcher)
                   inCashU.addTextChangedListener(watcher)
-                  inBolt.addTextChangedListener(watcher)
                   refresh()
               }
 
@@ -2127,7 +2117,7 @@ jobs:
                           Toast.makeText(this, "Nu pot deschide selectorul de fișiere", Toast.LENGTH_LONG).show()
                       }
                   })
-                  val ver = Ui.text(this, "FCM APP versiunea 2.7", 11f, Ui.MUTED)
+                  val ver = Ui.text(this, "FCM APP versiunea 2.8", 11f, Ui.MUTED)
                   ver.setPadding(0, dp(10), 0, 0)
                   bk.addView(ver)
                   col.addView(bk)
