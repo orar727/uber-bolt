@@ -58,8 +58,23 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 11
-                  versionName = "2.4"
+                  versionCode = 12
+                  versionName = "2.5"
+              }
+
+              // cheie de semnare fixă: actualizările se instalează peste aplicația existentă, fără ștergere
+              signingConfigs {
+                  create("fcm") {
+                      storeFile = rootProject.file("fcm.keystore")
+                      storePassword = "fcmapp2026"
+                      keyAlias = "fcm"
+                      keyPassword = "fcmapp2026"
+                  }
+              }
+              buildTypes {
+                  getByName("debug") {
+                      signingConfig = signingConfigs.getByName("fcm")
+                  }
               }
 
               compileOptions {
@@ -234,6 +249,8 @@ jobs:
 
           data class Fill(val id: Long, val date: Long, val liters: Double, val total: Double, val odo: Double)
 
+          data class Tip(val id: Long, val date: Long, val cash: Double, val fare: Double, val tip: Double)
+
           data class Shift(val id: Long, val start: Long, val end: Long, val km: Double, val pausedMs: Long = 0L, val bolt: Double = 0.0, val uber: Double = 0.0)
 
           object Store {
@@ -275,6 +292,125 @@ jobs:
 
               fun deleteFill(ctx: Context, id: Long) {
                   saveFills(ctx, fills(ctx).filter { it.id != id })
+              }
+
+              // ---------- bacșiș (cash − preț comandă) ----------
+              fun tips(ctx: Context): List<Tip> {
+                  val out = ArrayList<Tip>()
+                  try {
+                      val a = JSONArray(sp(ctx).getString("tips", "[]"))
+                      for (i in 0 until a.length()) {
+                          val o = a.getJSONObject(i)
+                          out.add(Tip(o.getLong("id"), o.getLong("d"), o.getDouble("c"), o.getDouble("f"), o.getDouble("t")))
+                      }
+                  } catch (e: Exception) {
+                  }
+                  return out.sortedByDescending { it.date }
+              }
+
+              private fun saveTips(ctx: Context, list: List<Tip>) {
+                  val a = JSONArray()
+                  for (t in list) {
+                      val o = JSONObject()
+                      o.put("id", t.id)
+                      o.put("d", t.date)
+                      o.put("c", t.cash)
+                      o.put("f", t.fare)
+                      o.put("t", t.tip)
+                      a.put(o)
+                  }
+                  sp(ctx).edit().putString("tips", a.toString()).apply()
+              }
+
+              fun addTip(ctx: Context, cash: Double, fare: Double) {
+                  val l = tips(ctx).toMutableList()
+                  val now = System.currentTimeMillis()
+                  l.add(Tip(now, now, cash, fare, cash - fare))
+                  saveTips(ctx, l)
+              }
+
+              fun deleteTip(ctx: Context, id: Long) {
+                  saveTips(ctx, tips(ctx).filter { it.id != id })
+              }
+
+              // ---------- ultimele solduri introduse (valabile în săptămâna curentă) ----------
+              fun weekBolt(ctx: Context, weekStart: Long): Double? {
+                  if (sp(ctx).getLong("last_bt", 0L) < weekStart) return null
+                  return sp(ctx).getString("last_b", null)?.toDoubleOrNull()
+              }
+
+              fun weekUber(ctx: Context, weekStart: Long): Double? {
+                  if (sp(ctx).getLong("last_ut", 0L) < weekStart) return null
+                  return sp(ctx).getString("last_u", null)?.toDoubleOrNull()
+              }
+
+              private fun saveLastBal(ctx: Context, b: Double?, u: Double?) {
+                  val e = sp(ctx).edit()
+                  val now = System.currentTimeMillis()
+                  if (b != null) e.putString("last_b", b.toString()).putLong("last_bt", now)
+                  if (u != null) e.putString("last_u", u.toString()).putLong("last_ut", now)
+                  e.apply()
+              }
+
+              // ---------- copie de siguranță ----------
+              fun exportAll(ctx: Context): String {
+                  val root = JSONObject()
+                  root.put("app", "FCM")
+                  root.put("v", 1)
+                  for (name in listOf("data", "cfg2")) {
+                      val o = JSONObject()
+                      for ((k, v) in ctx.getSharedPreferences(name, Context.MODE_PRIVATE).all) {
+                          val e = JSONObject()
+                          if (v is String) {
+                              e.put("t", "s")
+                              e.put("v", v)
+                          } else if (v is Long) {
+                              e.put("t", "l")
+                              e.put("v", v)
+                          } else if (v is Int) {
+                              e.put("t", "i")
+                              e.put("v", v)
+                          } else if (v is Boolean) {
+                              e.put("t", "b")
+                              e.put("v", v)
+                          } else if (v is Float) {
+                              e.put("t", "f")
+                              e.put("v", v.toDouble())
+                          } else {
+                              continue
+                          }
+                          o.put(k, e)
+                      }
+                      root.put(name, o)
+                  }
+                  return root.toString()
+              }
+
+              fun importAll(ctx: Context, text: String): Boolean {
+                  try {
+                      val root = JSONObject(text)
+                      if (root.optString("app") != "FCM") return false
+                      for (name in listOf("data", "cfg2")) {
+                          val o = root.optJSONObject(name) ?: continue
+                          val ed = ctx.getSharedPreferences(name, Context.MODE_PRIVATE).edit()
+                          ed.clear()
+                          val keys = o.keys()
+                          while (keys.hasNext()) {
+                              val k = keys.next()
+                              val e = o.getJSONObject(k)
+                              val t = e.getString("t")
+                              if (t == "s") ed.putString(k, e.getString("v"))
+                              else if (t == "l") ed.putLong(k, e.getLong("v"))
+                              else if (t == "i") ed.putInt(k, e.getInt("v"))
+                              else if (t == "b") ed.putBoolean(k, e.getBoolean("v"))
+                              else if (t == "f") ed.putFloat(k, e.getDouble("v").toFloat())
+                          }
+                          ed.apply()
+                      }
+                      return true
+                  } catch (e: Exception) {
+                      return false
+                  }
               }
 
               // ---------- ture ----------
@@ -383,6 +519,7 @@ jobs:
                   val now = System.currentTimeMillis()
                   val b0 = startBoltBal(ctx)
                   val u0 = startUberBal(ctx)
+                  saveLastBal(ctx, boltEnd, uberEnd)
                   val ib = if (b0 != null && boltEnd != null) boltEnd - b0 else 0.0
                   val iu = if (u0 != null && uberEnd != null) uberEnd - u0 else 0.0
                   l.add(Shift(now, s, now, km, pausedTotal(ctx), ib, iu))
@@ -828,6 +965,8 @@ jobs:
           import java.io.File
           import android.os.Build
           import android.os.Bundle
+          import android.text.Editable
+          import android.text.TextWatcher
           import android.os.Handler
           import android.os.Looper
           import android.os.PowerManager
@@ -1026,21 +1165,22 @@ jobs:
               }
 
               private fun cell(t: String, bold: Boolean, color: Int, w: Float, right: Boolean): TextView {
-                  val v = Ui.text(this, t, 13f, color, bold)
+                  val v = Ui.text(this, t, 12f, color, bold)
                   v.gravity = if (right) Gravity.END else Gravity.START
                   v.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, w)
                   return v
               }
 
-              private fun tableRow(label: String, km: String, inc: String, gpl: String, profit: String, header: Boolean, profitColor: Int): LinearLayout {
+              private fun tableRow(label: String, km: String, inc: String, tips: String, gpl: String, profit: String, header: Boolean, profitColor: Int): LinearLayout {
                   val r = LinearLayout(this)
                   r.orientation = LinearLayout.HORIZONTAL
                   r.setPadding(0, dp(7), 0, dp(7))
                   val c = if (header) Ui.MUTED else Ui.TEXT
-                  r.addView(cell(label, !header, c, 1.4f, false))
+                  r.addView(cell(label, !header, c, 1.5f, false))
                   r.addView(cell(km, false, c, 1f, true))
                   r.addView(cell(inc, false, c, 1f, true))
-                  r.addView(cell(gpl, false, c, 1f, true))
+                  r.addView(cell(tips, false, c, 0.8f, true))
+                  r.addView(cell(gpl, false, c, 0.9f, true))
                   r.addView(cell(profit, !header, if (header) Ui.MUTED else profitColor, 1f, true))
                   return r
               }
@@ -1105,10 +1245,18 @@ jobs:
                       Toast.makeText(this, "Pornește locația (GPS) din setările telefonului", Toast.LENGTH_LONG).show()
                       return
                   }
+                  // în aceeași săptămână (luni–duminică) soldul de început = soldul introdus la finalul turei precedente
+                  val ws = startOfWeek(System.currentTimeMillis())
+                  val pb = Store.weekBolt(this, ws)
+                  val pu = Store.weekUber(this, ws)
+                  if (pb != null && pu != null) {
+                      doStart(pb, pu)
+                      return
+                  }
                   twoDialog(
                       "Începe tura",
-                      "Opțional: treci soldul/câștigurile afișate acum în aplicații. La final, diferența = banii făcuți în tură.",
-                      "Sold Bolt acum (lei)", "Sold Uber acum (lei)", null, null,
+                      "Săptămână nouă: treci soldul afișat acum în aplicații. În restul săptămânii (până duminică) se preia singur din tura precedentă.",
+                      "Sold Bolt acum (lei)", "Sold Uber acum (lei)", pb, pu,
                       "Începe", "Fără sold",
                       { b, u -> doStart(b, u) },
                       { doStart(null, null) }
@@ -1243,6 +1391,7 @@ jobs:
                   val kmS = DoubleArray(4)
                   val incS = DoubleArray(4)
                   val gplS = DoubleArray(4)
+                  val tipS = DoubleArray(4)
                   for (sh in shifts) {
                       for (k in 0 until 4) {
                           if (sh.start >= starts[k]) {
@@ -1262,22 +1411,29 @@ jobs:
                           if (f.date >= starts[k]) gplS[k] += f.total
                       }
                   }
+                  for (t in Store.tips(this)) {
+                      for (k in 0 until 4) {
+                          if (t.date >= starts[k]) tipS[k] += t.tip
+                      }
+                  }
                   val sum = Ui.card(this)
                   sum.addView(Ui.text(this, "STATISTICI", 12f, Ui.MUTED, true))
-                  sum.addView(tableRow("", "Km", "Încasat", "GPL", "Profit", true, Ui.MUTED))
+                  sum.addView(tableRow("", "Km", "Încasat", "Tips", "GPL", "Profit", true, Ui.MUTED))
                   for (k in 0 until 4) {
-                      val pr = incS[k] - gplS[k]
+                      val pr = incS[k] + tipS[k] - gplS[k]
                       sum.addView(
                           tableRow(
-                              names[k], Ui.num(kmS[k], 1), Ui.num(incS[k], 0), Ui.num(gplS[k], 0), Ui.num(pr, 0),
+                              names[k], Ui.num(kmS[k], 1), Ui.num(incS[k], 0), Ui.num(tipS[k], 0), Ui.num(gplS[k], 0), Ui.num(pr, 0),
                               false, if (pr >= 0.0) Ui.GOOD else Ui.BAD
                           )
                       )
                   }
-                  val foot = Ui.text(this, "Încasat = diferența de sold (final − început). Profit = încasat − GPL din bonuri. O tură se numără în ziua în care a început.", 11f, Ui.MUTED)
+                  val foot = Ui.text(this, "Încasat = diferența de sold (final − început). Profit = încasat + tips − GPL din bonuri. O tură se numără în ziua în care a început.", 11f, Ui.MUTED)
                   foot.setPadding(0, dp(8), 0, 0)
                   sum.addView(foot)
                   col.addView(sum)
+
+                  buildTips(col)
 
                   val recent = Ui.card(this)
                   recent.addView(Ui.text(this, "TURE ÎNCHEIATE", 12f, Ui.MUTED, true))
@@ -1347,6 +1503,93 @@ jobs:
                       live = r
                       r.run()
                   }
+              }
+
+              // ---------------- bacșiș ----------------
+
+              private fun buildTips(col: LinearLayout) {
+                  val card = Ui.card(this)
+                  card.addView(Ui.text(this, "BACȘIȘ (CASH)", 12f, Ui.MUTED, true))
+                  val hint = Ui.text(this, "Clientul a dat cash mai mult decât comanda; diferența e bacșișul. Ex.: a dat 50, comanda 39 = 11 lei.", 13f, Ui.MUTED)
+                  hint.setPadding(0, dp(6), 0, dp(4))
+                  card.addView(hint)
+                  val inCash = Ui.input(this, "Cash primit (lei)", true)
+                  val inFare = Ui.input(this, "Prețul comenzii (lei)", true)
+                  val res = Ui.text(this, "", 20f, Ui.ACCENT, true)
+                  res.setPadding(0, dp(8), 0, 0)
+                  card.addView(inCash, Ui.lp(this, 8, 8))
+                  card.addView(inFare, Ui.lp(this, 0))
+                  card.addView(res)
+                  val watcher = object : TextWatcher {
+                      override fun beforeTextChanged(x: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(x: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun afterTextChanged(x: Editable?) {
+                          val c = parseMoney(inCash)
+                          val f = parseMoney(inFare)
+                          if (c != null && f != null) {
+                              val t = c - f
+                              if (t > 0.0) {
+                                  res.text = "Bacșiș: " + Ui.num(t, 2) + " lei"
+                                  res.setTextColor(Ui.GOOD)
+                              } else if (t == 0.0) {
+                                  res.text = "Fără bacșiș"
+                                  res.setTextColor(Ui.MUTED)
+                              } else {
+                                  res.text = "Cashul e mai mic decât comanda"
+                                  res.setTextColor(Ui.BAD)
+                              }
+                          } else {
+                              res.text = ""
+                          }
+                      }
+                  }
+                  inCash.addTextChangedListener(watcher)
+                  inFare.addTextChangedListener(watcher)
+                  card.addView(Ui.button(this, "Adaugă bacșișul", true) {
+                      val c = parseMoney(inCash)
+                      val f = parseMoney(inFare)
+                      if (c == null || f == null || f <= 0.0) {
+                          Toast.makeText(this, "Completează cashul și prețul comenzii", Toast.LENGTH_SHORT).show()
+                      } else if (c <= f) {
+                          Toast.makeText(this, "Cashul trebuie să fie mai mare decât comanda", Toast.LENGTH_SHORT).show()
+                      } else {
+                          Store.addTip(this, c, f)
+                          Toast.makeText(this, "Bacșiș salvat: " + Ui.num(c - f, 2) + " lei", Toast.LENGTH_SHORT).show()
+                          show(0)
+                      }
+                  })
+                  val tips = Store.tips(this)
+                  if (tips.isNotEmpty()) {
+                      val now = System.currentTimeMillis()
+                      val ds = startOfDay(now)
+                      val ws = startOfWeek(now)
+                      val ms = startOfMonth(now)
+                      var d = 0.0
+                      var w = 0.0
+                      var m = 0.0
+                      for (t in tips) {
+                          if (t.date >= ds) d += t.tip
+                          if (t.date >= ws) w += t.tip
+                          if (t.date >= ms) m += t.tip
+                      }
+                      card.addView(
+                          statsRow(
+                              stat(Ui.num(d, 2), "azi (lei)", Ui.GOOD),
+                              stat(Ui.num(w, 2), "săptămâna", Ui.GOOD),
+                              stat(Ui.num(m, 2), "luna", Ui.GOOD)
+                          )
+                      )
+                      val df = SimpleDateFormat("dd.MM HH:mm", loc)
+                      for (t in tips.take(5)) {
+                          val left = df.format(Date(t.date)) + "  •  +" + Ui.num(t.tip, 2) + " lei"
+                          val sub = "cash " + Ui.num(t.cash, 2) + " − comandă " + Ui.num(t.fare, 2)
+                          card.addView(listRow(left, sub, null) {
+                              Store.deleteTip(this, t.id)
+                              show(0)
+                          })
+                      }
+                  }
+                  col.addView(card)
               }
 
               // ---------------- fila GPL ----------------
@@ -1516,6 +1759,32 @@ jobs:
               override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
                   super.onActivityResult(requestCode, resultCode, data)
                   if (resultCode != RESULT_OK) return
+                  if (requestCode == 21) {
+                      val u = data?.data
+                      if (u != null) {
+                          try {
+                              contentResolver.openOutputStream(u)?.use { it.write(Store.exportAll(this).toByteArray(Charsets.UTF_8)) }
+                              Toast.makeText(this, "Datele au fost salvate", Toast.LENGTH_LONG).show()
+                          } catch (e: Exception) {
+                              Toast.makeText(this, "Nu am putut salva fișierul", Toast.LENGTH_LONG).show()
+                          }
+                      }
+                      return
+                  }
+                  if (requestCode == 22) {
+                      val u = data?.data
+                      if (u != null) {
+                          var ok = false
+                          try {
+                              val txt = contentResolver.openInputStream(u)?.use { String(it.readBytes(), Charsets.UTF_8) }
+                              if (txt != null) ok = Store.importAll(this, txt)
+                          } catch (e: Exception) {
+                          }
+                          Toast.makeText(this, if (ok) "Datele au fost importate" else "Fișier necunoscut sau stricat", Toast.LENGTH_LONG).show()
+                          show(tab)
+                      }
+                      return
+                  }
                   var uri: Uri? = null
                   if (requestCode == 11) {
                       uri = Uri.fromFile(File(cacheDir, "bon.jpg"))
@@ -1638,6 +1907,37 @@ jobs:
                   })
                   acc.addView(Ui.button(this, "Permite rularea în fundal (baterie)", false) { askBattery() })
                   col.addView(acc)
+
+                  val bk = Ui.card(this)
+                  bk.addView(Ui.text(this, "COPIE DE SIGURANȚĂ", 12f, Ui.MUTED, true))
+                  val bkInfo = Ui.text(this, "Salvează toate tururile, bonurile, bacșișurile și setările într-un fișier (în Descărcări sau Drive). Îl poți importa înapoi dacă schimbi telefonul sau reinstalezi aplicația.", 13f, Ui.MUTED)
+                  bkInfo.setPadding(0, dp(6), 0, 0)
+                  bk.addView(bkInfo)
+                  bk.addView(Ui.button(this, "Exportă datele", false) {
+                      val i = Intent(Intent.ACTION_CREATE_DOCUMENT)
+                      i.addCategory(Intent.CATEGORY_OPENABLE)
+                      i.type = "application/json"
+                      i.putExtra(Intent.EXTRA_TITLE, "fcm-backup-" + SimpleDateFormat("yyyy-MM-dd", loc).format(Date()) + ".json")
+                      try {
+                          startActivityForResult(i, 21)
+                      } catch (e: Exception) {
+                          Toast.makeText(this, "Nu pot deschide selectorul de fișiere", Toast.LENGTH_LONG).show()
+                      }
+                  })
+                  bk.addView(Ui.button(this, "Importă datele", false) {
+                      val i = Intent(Intent.ACTION_OPEN_DOCUMENT)
+                      i.addCategory(Intent.CATEGORY_OPENABLE)
+                      i.type = "*/*"
+                      try {
+                          startActivityForResult(i, 22)
+                      } catch (e: Exception) {
+                          Toast.makeText(this, "Nu pot deschide selectorul de fișiere", Toast.LENGTH_LONG).show()
+                      }
+                  })
+                  val ver = Ui.text(this, "FCM APP versiunea 2.5", 11f, Ui.MUTED)
+                  ver.setPadding(0, dp(10), 0, 0)
+                  bk.addView(ver)
+                  col.addView(bk)
 
                   val dg = Ui.card(this)
                   dg.addView(Ui.text(this, "ULTIMA CITIRE (DEPANARE)", 12f, Ui.MUTED, true))
@@ -2454,6 +2754,45 @@ jobs:
           EOF
           base64 -d icon.b64 > app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
           rm icon.b64
+          cat > fcm.b64 <<'EOF'
+          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
+          EOF
+          base64 -d fcm.b64 > fcm.keystore
+          rm fcm.b64
           find . -path ./.git -prune -o -type f -print | sort
 
       - uses: actions/setup-java@v4
