@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 12
-                  versionName = "2.5"
+                  versionCode = 13
+                  versionName = "2.6"
               }
 
               // cheie de semnare fixă: actualizările se instalează peste aplicația existentă, fără ștergere
@@ -350,6 +350,19 @@ jobs:
                   if (b != null) e.putString("last_b", b.toString()).putLong("last_bt", now)
                   if (u != null) e.putString("last_u", u.toString()).putLong("last_ut", now)
                   e.apply()
+              }
+
+              // ---------- calcul săptămânal (valori editabile) ----------
+              fun gGet(ctx: Context, key: String, def: String): String = sp(ctx).getString("g_" + key, def) ?: def
+
+              fun gSet(ctx: Context, key: String, v: String) {
+                  sp(ctx).edit().putString("g_" + key, v).apply()
+              }
+
+              fun wkGet(ctx: Context, key: String, weekStart: Long): String? = sp(ctx).getString("wk_" + key + "_" + weekStart, null)
+
+              fun wkSet(ctx: Context, key: String, weekStart: Long, v: String) {
+                  sp(ctx).edit().putString("wk_" + key + "_" + weekStart, v).apply()
               }
 
               // ---------- copie de siguranță ----------
@@ -993,6 +1006,7 @@ jobs:
               private val handler = Handler(Looper.getMainLooper())
               private var live: Runnable? = null
               private var tab = 0
+              private var weekOff = 0
               private val loc = Locale("ro", "RO")
               private var pendL = ""
               private var pendT = ""
@@ -1032,12 +1046,12 @@ jobs:
                   bar.orientation = LinearLayout.HORIZONTAL
                   bar.setBackgroundColor(Ui.SURFACE)
                   bar.setPadding(dp(8), dp(8), dp(8), dp(8))
-                  val names = listOf("Tură", "GPL", "Setări")
+                  val names = listOf("Tură", "GPL", "Săptămâna", "Setări")
                   for (i in names.indices) {
                       val b = Button(this)
                       b.text = names[i]
                       b.isAllCaps = false
-                      b.textSize = 15f
+                      b.textSize = 13f
                       b.setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
                       b.setOnClickListener { show(i) }
                       val p = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
@@ -1105,6 +1119,7 @@ jobs:
                   when (i) {
                       0 -> buildShift(col)
                       1 -> buildGpl(col)
+                      2 -> buildWeek(col)
                       else -> buildSettings(col)
                   }
                   val sv = ScrollView(this)
@@ -1865,6 +1880,173 @@ jobs:
                   show(1)
               }
 
+              // ---------------- fila SĂPTĂMÂNA (calcul final de plată) ----------------
+
+              private fun weekStartFor(off: Int): Long {
+                  val c = Calendar.getInstance()
+                  c.timeInMillis = startOfWeek(System.currentTimeMillis())
+                  c.add(Calendar.DAY_OF_MONTH, off * 7)
+                  return c.timeInMillis
+              }
+
+              private fun pairRow(label: String, size: Float, color: Int, bold: Boolean): Pair<LinearLayout, TextView> {
+                  val r = LinearLayout(this)
+                  r.orientation = LinearLayout.HORIZONTAL
+                  r.setPadding(0, dp(6), 0, dp(6))
+                  val l = Ui.text(this, label, size, Ui.MUTED)
+                  r.addView(l, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  val v = Ui.text(this, "", size, color, bold)
+                  v.gravity = Gravity.END
+                  r.addView(v)
+                  return Pair(r, v)
+              }
+
+              private fun buildWeek(col: LinearLayout) {
+                  val ws = weekStartFor(weekOff)
+                  val cal = Calendar.getInstance()
+                  cal.timeInMillis = ws
+                  cal.add(Calendar.DAY_OF_MONTH, 7)
+                  val we = cal.timeInMillis
+                  cal.add(Calendar.DAY_OF_MONTH, -1)
+                  val lastDay = cal.timeInMillis
+
+                  var auto = 0.0
+                  var km = 0.0
+                  for (sh in Store.shifts(this)) {
+                      if (sh.start >= ws && sh.start < we) {
+                          auto += sh.bolt + sh.uber
+                          km += sh.km
+                      }
+                  }
+                  var gpl = 0.0
+                  for (f in Store.fills(this)) {
+                      if (f.date >= ws && f.date < we) gpl += f.total
+                  }
+                  val df = SimpleDateFormat("dd.MM", loc)
+
+                  val head = Ui.card(this)
+                  val nav = LinearLayout(this)
+                  nav.orientation = LinearLayout.HORIZONTAL
+                  nav.gravity = Gravity.CENTER_VERTICAL
+                  val prev = Ui.text(this, "◀", 22f, Ui.ACCENT, true)
+                  prev.setPadding(dp(8), dp(4), dp(16), dp(4))
+                  prev.setOnClickListener {
+                      weekOff--
+                      show(2)
+                  }
+                  val next = Ui.text(this, "▶", 22f, if (weekOff < 0) Ui.ACCENT else Ui.LINE, true)
+                  next.setPadding(dp(16), dp(4), dp(8), dp(4))
+                  next.setOnClickListener {
+                      if (weekOff < 0) {
+                          weekOff++
+                          show(2)
+                      }
+                  }
+                  val ttl = LinearLayout(this)
+                  ttl.orientation = LinearLayout.VERTICAL
+                  ttl.gravity = Gravity.CENTER_HORIZONTAL
+                  ttl.addView(Ui.text(this, if (weekOff == 0) "SĂPTĂMÂNA CURENTĂ" else "SĂPTĂMÂNA", 12f, Ui.MUTED, true))
+                  ttl.addView(Ui.text(this, df.format(Date(ws)) + " – " + df.format(Date(lastDay)), 18f, Ui.TEXT, true))
+                  nav.addView(prev)
+                  nav.addView(ttl, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                  nav.addView(next)
+                  head.addView(nav)
+                  val info = Ui.text(this, "Din ture: " + Ui.num(auto, 2) + " lei încasat  •  " + Ui.num(km, 1) + " km  •  GPL " + Ui.num(gpl, 2) + " lei", 12f, Ui.MUTED)
+                  info.setPadding(0, dp(8), 0, 0)
+                  head.addView(info)
+                  col.addView(head)
+
+                  val form = Ui.card(this)
+                  form.addView(Ui.text(this, "CALCUL DE PLATĂ", 12f, Ui.MUTED, true))
+                  fun label(t: String): TextView {
+                      val l = Ui.text(this, t, 13f, Ui.MUTED)
+                      l.setPadding(0, dp(10), 0, dp(4))
+                      return l
+                  }
+                  val inTotal = Ui.input(this, "", true)
+                  inTotal.setText(Store.wkGet(this, "total", ws) ?: Ui.num(auto, 2))
+                  val inCom = Ui.input(this, "", true)
+                  inCom.setText(Store.gGet(this, "com", "10"))
+                  val inCar = Ui.input(this, "", true)
+                  inCar.setText(Store.gGet(this, "car", "650"))
+                  val inCash = Ui.input(this, "", true)
+                  inCash.setText(Store.wkGet(this, "cash", ws) ?: "")
+                  val inBolt = Ui.input(this, "", true)
+                  inBolt.setText(Store.wkGet(this, "bolt", ws) ?: "")
+                  form.addView(label("Suma făcută în aplicații, Bolt + Uber (lei)"))
+                  form.addView(inTotal, Ui.lp(this, 0))
+                  val reset = Ui.text(this, "Reia suma din ture (" + Ui.num(auto, 2) + ")", 12f, Ui.ACCENT, true)
+                  reset.setPadding(0, dp(6), 0, 0)
+                  reset.setOnClickListener { inTotal.setText(Ui.num(auto, 2)) }
+                  form.addView(reset)
+                  form.addView(label("Comision (%)"))
+                  form.addView(inCom, Ui.lp(this, 0))
+                  form.addView(label("Costuri mașină (lei)"))
+                  form.addView(inCar, Ui.lp(this, 0))
+                  form.addView(label("Cash în mână din comenzi (lei)"))
+                  form.addView(inCash, Ui.lp(this, 0))
+                  form.addView(label("Deja primit pe Bolt (lei)"))
+                  form.addView(inBolt, Ui.lp(this, 0))
+                  col.addView(form)
+
+                  val out = Ui.card(this)
+                  out.addView(Ui.text(this, "REZULTAT", 12f, Ui.MUTED, true))
+                  val rBrut = pairRow("Suma făcută", 15f, Ui.TEXT, false)
+                  val rCom = pairRow("Comision", 15f, Ui.TEXT, false)
+                  val rCar = pairRow("Mașină", 15f, Ui.TEXT, false)
+                  val rNet = pairRow("Rămâne", 17f, Ui.TEXT, true)
+                  val rCash = pairRow("Cash în mână", 15f, Ui.TEXT, false)
+                  val rBolt = pairRow("Deja pe Bolt", 15f, Ui.TEXT, false)
+                  val rPay = pairRow("DE PRIMIT", 20f, Ui.ACCENT, true)
+                  out.addView(rBrut.first)
+                  out.addView(rCom.first)
+                  out.addView(rCar.first)
+                  out.addView(rNet.first)
+                  out.addView(rCash.first)
+                  out.addView(rBolt.first)
+                  out.addView(rPay.first)
+                  col.addView(out)
+
+                  fun refresh() {
+                      val g = parseMoney(inTotal) ?: 0.0
+                      val pct = parseMoney(inCom) ?: 0.0
+                      val car = parseMoney(inCar) ?: 0.0
+                      val cash = parseMoney(inCash) ?: 0.0
+                      val bolt = parseMoney(inBolt) ?: 0.0
+                      val com = g * pct / 100.0
+                      val net = g - com - car
+                      val pay = net - cash - bolt
+                      rBrut.second.text = Ui.num(g, 2) + " lei"
+                      rCom.second.text = "− " + Ui.num(com, 2) + " lei (" + Ui.num(pct, 1) + "%)"
+                      rCar.second.text = "− " + Ui.num(car, 2) + " lei"
+                      rNet.second.text = Ui.num(net, 2) + " lei"
+                      rNet.second.setTextColor(if (net >= 0.0) Ui.GOOD else Ui.BAD)
+                      rCash.second.text = "− " + Ui.num(cash, 2) + " lei"
+                      rBolt.second.text = "− " + Ui.num(bolt, 2) + " lei"
+                      rPay.second.text = Ui.num(pay, 2) + " lei"
+                      rPay.second.setTextColor(if (pay >= 0.0) Ui.ACCENT else Ui.BAD)
+                  }
+
+                  val watcher = object : TextWatcher {
+                      override fun beforeTextChanged(x: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun onTextChanged(x: CharSequence?, a: Int, b: Int, c: Int) {}
+                      override fun afterTextChanged(x: Editable?) {
+                          Store.wkSet(this@MainActivity, "total", ws, inTotal.text.toString())
+                          Store.gSet(this@MainActivity, "com", inCom.text.toString())
+                          Store.gSet(this@MainActivity, "car", inCar.text.toString())
+                          Store.wkSet(this@MainActivity, "cash", ws, inCash.text.toString())
+                          Store.wkSet(this@MainActivity, "bolt", ws, inBolt.text.toString())
+                          refresh()
+                      }
+                  }
+                  inTotal.addTextChangedListener(watcher)
+                  inCom.addTextChangedListener(watcher)
+                  inCar.addTextChangedListener(watcher)
+                  inCash.addTextChangedListener(watcher)
+                  inBolt.addTextChangedListener(watcher)
+                  refresh()
+              }
+
               // ---------------- fila SETĂRI ----------------
 
               private fun buildSettings(col: LinearLayout) {
@@ -1934,7 +2116,7 @@ jobs:
                           Toast.makeText(this, "Nu pot deschide selectorul de fișiere", Toast.LENGTH_LONG).show()
                       }
                   })
-                  val ver = Ui.text(this, "FCM APP versiunea 2.5", 11f, Ui.MUTED)
+                  val ver = Ui.text(this, "FCM APP versiunea 2.6", 11f, Ui.MUTED)
                   ver.setPadding(0, dp(10), 0, 0)
                   bk.addView(ver)
                   col.addView(bk)
