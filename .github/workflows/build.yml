@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 19
-                  versionName = "3.2"
+                  versionCode = 20
+                  versionName = "3.3"
               }
 
               // cheie de semnare fixă: actualizările se instalează peste aplicația existentă, fără ștergere
@@ -1106,6 +1106,7 @@ jobs:
               private var tab = 0
               private var weekOff = 0
               private var statPeriod = 0
+              private var gplPeriod = 2
               private val loc = Locale("ro", "RO")
               private var pendL = ""
               private var pendT = ""
@@ -1135,6 +1136,10 @@ jobs:
                   val appWord = Ui.text(this, " APP", 28f, Ui.TEXT, false)
                   titleRow.addView(appWord)
                   header.addView(titleRow)
+                  val dateTxt = SimpleDateFormat("EEEE, d MMMM", loc).format(Date())
+                  val dateTv = Ui.text(this, dateTxt.replaceFirstChar { it.uppercase() }, 13f, Ui.MUTED)
+                  dateTv.setPadding(dp(2), dp(2), 0, 0)
+                  header.addView(dateTv)
                   status = Ui.text(this, "", 12f, Ui.MUTED)
                   status.setPadding(dp(12), dp(6), dp(12), dp(6))
                   status.background = Ui.rounded(this, Ui.SURFACE, 16, Ui.LINE, 1)
@@ -1240,6 +1245,9 @@ jobs:
                   val sv = ScrollView(this)
                   sv.addView(col)
                   content.addView(sv)
+                  sv.alpha = 0f
+                  sv.translationY = dp(14).toFloat()
+                  sv.animate().alpha(1f).translationY(0f).setDuration(220).start()
               }
 
               // ---------------- ajutoare ----------------
@@ -1356,6 +1364,11 @@ jobs:
                   r.orientation = LinearLayout.HORIZONTAL
                   r.gravity = Gravity.CENTER_VERTICAL
                   r.setPadding(0, dp(8), 0, dp(8))
+                  val accentBar = View(this)
+                  accentBar.background = Ui.rounded(this, Ui.ACCENT, 3)
+                  val barLp = LinearLayout.LayoutParams(dp(4), dp(36))
+                  barLp.setMargins(0, 0, dp(12), 0)
+                  r.addView(accentBar, barLp)
                   val tv = LinearLayout(this)
                   tv.orientation = LinearLayout.VERTICAL
                   tv.addView(Ui.text(this, left, 15f))
@@ -1791,40 +1804,43 @@ jobs:
               private fun buildGpl(col: LinearLayout) {
                   val fills = Store.fills(this)
                   val nowMs = System.currentTimeMillis()
-                  val monthStart = startOfMonth(nowMs)
-                  val weekStart = startOfWeek(nowMs)
-                  val dayStart = startOfDay(nowMs)
-                  var spent = 0.0
-                  var liters = 0.0
-                  var month = 0.0
-                  var week = 0.0
-                  var day = 0.0
+                  val gStarts = longArrayOf(startOfDay(nowMs), startOfWeek(nowMs), startOfMonth(nowMs), 0L)
+                  val gSpent = DoubleArray(4)
+                  val gLit = DoubleArray(4)
+                  val gCnt = IntArray(4)
                   for (f in fills) {
-                      spent += f.total
-                      liters += f.liters
-                      if (f.date >= monthStart) month += f.total
-                      if (f.date >= weekStart) week += f.total
-                      if (f.date >= dayStart) day += f.total
+                      for (k in 0 until 4) {
+                          if (f.date >= gStarts[k]) {
+                              gSpent[k] += f.total
+                              gLit[k] += f.liters
+                              gCnt[k] += 1
+                          }
+                      }
                   }
-                  val avg = if (liters > 0.0) spent / liters else 0.0
+                  val gp = gplPeriod
+                  val avg = if (gLit[gp] > 0.0) gSpent[gp] / gLit[gp] else 0.0
 
                   val sum = Ui.hero(this)
                   sum.addView(Ui.text(this, "CHELTUIT PE GPL", 12f, Ui.MUTED, true))
-                  sum.addView(Ui.text(this, Ui.num(spent, 2) + " lei", 40f, Ui.ACCENT, true))
-                  sum.addView(
-                      statsRow(
-                          stat(Ui.num(day, 0), "azi (lei)", Ui.TEXT),
-                          stat(Ui.num(week, 0), "săptămâna (lei)", Ui.TEXT),
-                          stat(Ui.num(month, 0), "luna (lei)", Ui.TEXT)
-                      )
-                  )
-                  sum.addView(
-                      statsRow(
-                          stat(Ui.num(liters, 1), "litri în total", Ui.TEXT),
-                          stat(Ui.num(avg, 2), "preț mediu /l", Ui.TEXT),
-                          stat(Ui.num(fills.size.toDouble(), 0), "alimentări", Ui.TEXT)
-                      )
-                  )
+                  val gChips = LinearLayout(this)
+                  gChips.orientation = LinearLayout.HORIZONTAL
+                  gChips.setPadding(0, dp(10), 0, dp(4))
+                  val gNames = listOf("Azi", "Săpt.", "Luna", "Total")
+                  for (k in 0 until 4) {
+                      val ch = Ui.chip(this, gNames[k], k == gp) {
+                          gplPeriod = k
+                          show(1)
+                      }
+                      val cl = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                      cl.setMargins(dp(3), 0, dp(3), 0)
+                      gChips.addView(ch, cl)
+                  }
+                  sum.addView(gChips)
+                  val bigGpl = Ui.text(this, Ui.num(gSpent[gp], 2) + " lei", 46f, Ui.ACCENT, true)
+                  bigGpl.setPadding(0, dp(10), 0, 0)
+                  sum.addView(bigGpl)
+                  sum.addView(tilePair(Ui.tile(this, "LITRI", Ui.num(gLit[gp], 1), Ui.TEXT), Ui.tile(this, "PREȚ MEDIU /L", Ui.num(avg, 2) + " lei", Ui.TEXT)))
+                  sum.addView(tilePair(Ui.tile(this, "ALIMENTĂRI", gCnt[gp].toString(), Ui.TEXT), Ui.tile(this, "TOTAL GENERAL", Ui.num(gSpent[3], 0) + " lei", Ui.MUTED)))
 
                   // consum și cost pe km, din kilometrii de bord de la alimentări
                   val withOdo = fills.filter { it.odo > 0.0 }.sortedBy { it.odo }
@@ -2187,7 +2203,9 @@ jobs:
                   val rNet = pairRow("Rămâne", 17f, Ui.TEXT, true)
                   val rCashB = pairRow("Cash Bolt", 15f, Ui.TEXT, false)
                   val rCashU = pairRow("Cash Uber", 15f, Ui.TEXT, false)
-                  val rPay = pairRow("DE PRIMIT", 24f, Ui.ACCENT, true)
+                  val payLab = Ui.text(this, "DE PRIMIT", 11f, Ui.MUTED, true)
+                  payLab.setPadding(0, dp(10), 0, 0)
+                  val payBig = Ui.text(this, "", 46f, Ui.ACCENT, true)
                   out.addView(rTB.first)
                   out.addView(rTU.first)
                   out.addView(rBrut.first)
@@ -2196,7 +2214,8 @@ jobs:
                   out.addView(rNet.first)
                   out.addView(rCashB.first)
                   out.addView(rCashU.first)
-                  out.addView(rPay.first)
+                  out.addView(payLab)
+                  out.addView(payBig)
                   col.addView(out)
 
                   fun refresh() {
@@ -2220,8 +2239,8 @@ jobs:
                       rNet.second.setTextColor(if (net >= 0.0) Ui.GOOD else Ui.BAD)
                       rCashB.second.text = "− " + Ui.num(cashB, 2) + " lei"
                       rCashU.second.text = "− " + Ui.num(cashU, 2) + " lei"
-                      rPay.second.text = Ui.num(pay, 2) + " lei"
-                      rPay.second.setTextColor(if (pay >= 0.0) Ui.ACCENT else Ui.BAD)
+                      payBig.text = Ui.num(pay, 2) + " lei"
+                      payBig.setTextColor(if (pay >= 0.0) Ui.ACCENT else Ui.BAD)
                   }
 
                   val watcher = object : TextWatcher {
@@ -2315,7 +2334,7 @@ jobs:
                           Toast.makeText(this, "Nu pot deschide selectorul de fișiere", Toast.LENGTH_LONG).show()
                       }
                   })
-                  val ver = Ui.text(this, "FCM APP versiunea 3.2", 11f, Ui.MUTED)
+                  val ver = Ui.text(this, "FCM APP versiunea 3.3", 11f, Ui.MUTED)
                   ver.setPadding(0, dp(10), 0, 0)
                   bk.addView(ver)
                   col.addView(bk)
