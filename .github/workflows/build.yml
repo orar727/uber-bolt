@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 18
-                  versionName = "3.1"
+                  versionCode = 19
+                  versionName = "3.2"
               }
 
               // cheie de semnare fixă: actualizările se instalează peste aplicația existentă, fără ștergere
@@ -560,16 +560,17 @@ jobs:
           import java.util.Locale
 
           object Ui {
-              val BG = Color.parseColor("#0B0F17")
-              val SURFACE = Color.parseColor("#131A26")
-              val SURFACE2 = Color.parseColor("#1B2434")
-              val LINE = Color.parseColor("#273247")
-              val TEXT = Color.parseColor("#F2F5FA")
-              val MUTED = Color.parseColor("#8D99AE")
-              val ACCENT = Color.parseColor("#FFC233")
-              val ACCENT_FG = Color.parseColor("#1A1200")
-              val GOOD = Color.parseColor("#4FD1A0")
-              val BAD = Color.parseColor("#FF7B84")
+              val BG = Color.parseColor("#0C0E13")
+              val BG2 = Color.parseColor("#151A12")
+              val SURFACE = Color.parseColor("#161A22")
+              val SURFACE2 = Color.parseColor("#1F242E")
+              val LINE = Color.parseColor("#2A303C")
+              val TEXT = Color.parseColor("#F4F6FA")
+              val MUTED = Color.parseColor("#8A93A3")
+              val ACCENT = Color.parseColor("#C6FF3D")
+              val ACCENT_FG = Color.parseColor("#121A00")
+              val GOOD = Color.parseColor("#3DDC97")
+              val BAD = Color.parseColor("#FF5C6C")
 
               fun dp(ctx: Context, v: Int): Int = (v * ctx.resources.displayMetrics.density).toInt()
 
@@ -591,6 +592,47 @@ jobs:
                   return g
               }
 
+              fun bgGradient(): GradientDrawable =
+                  GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, intArrayOf(BG, BG2))
+
+              fun circle(ctx: Context, fill: Int, stroke: Int, strokeDp: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.shape = GradientDrawable.OVAL
+                  g.setColor(fill)
+                  g.setStroke(dp(ctx, strokeDp), stroke)
+                  return g
+              }
+
+              fun chip(ctx: Context, label: String, selected: Boolean, onClick: () -> Unit): TextView {
+                  val t = TextView(ctx)
+                  t.text = label
+                  t.textSize = 13f
+                  t.gravity = android.view.Gravity.CENTER
+                  t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL))
+                  t.setPadding(dp(ctx, 8), dp(ctx, 9), dp(ctx, 8), dp(ctx, 9))
+                  if (selected) {
+                      t.setTextColor(ACCENT_FG)
+                      t.background = rounded(ctx, ACCENT, 20)
+                  } else {
+                      t.setTextColor(MUTED)
+                      t.background = rounded(ctx, SURFACE2, 20)
+                  }
+                  t.setOnClickListener { onClick() }
+                  return t
+              }
+
+              fun tile(ctx: Context, label: String, value: String, color: Int): LinearLayout {
+                  val l = LinearLayout(ctx)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.setPadding(dp(ctx, 14), dp(ctx, 12), dp(ctx, 14), dp(ctx, 12))
+                  l.background = rounded(ctx, SURFACE2, 16)
+                  l.addView(text(ctx, label, 11f, MUTED, true))
+                  val v = text(ctx, value, 20f, color, true)
+                  v.setPadding(0, dp(ctx, 4), 0, 0)
+                  l.addView(v)
+                  return l
+              }
+
               fun lp(ctx: Context, bottomDp: Int = 0, topDp: Int = 0): LinearLayout.LayoutParams {
                   val p = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
                   p.setMargins(0, dp(ctx, topDp), 0, dp(ctx, bottomDp))
@@ -601,7 +643,7 @@ jobs:
                   val c = LinearLayout(ctx)
                   c.orientation = LinearLayout.VERTICAL
                   c.setPadding(dp(ctx, 18), dp(ctx, 16), dp(ctx, 18), dp(ctx, 16))
-                  c.background = rounded(ctx, SURFACE, 18, LINE, 1)
+                  c.background = rounded(ctx, SURFACE, 24, LINE, 1)
                   c.layoutParams = lp(ctx, 14)
                   return c
               }
@@ -611,7 +653,7 @@ jobs:
                   val c = LinearLayout(ctx)
                   c.orientation = LinearLayout.VERTICAL
                   c.setPadding(dp(ctx, 20), dp(ctx, 18), dp(ctx, 20), dp(ctx, 18))
-                  c.background = gradient(ctx, Color.parseColor("#22304A"), Color.parseColor("#131A26"), 22, Color.parseColor("#3A4A68"), 1)
+                  c.background = gradient(ctx, Color.parseColor("#1F2A10"), Color.parseColor("#161A22"), 28, Color.parseColor("#3C5018"), 1)
                   c.layoutParams = lp(ctx, 14)
                   return c
               }
@@ -630,7 +672,7 @@ jobs:
                   t.setTextColor(color)
                   if (bold) {
                       if (size >= 30f) {
-                          t.setTypeface(Typeface.DEFAULT_BOLD)
+                          t.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL))
                       } else {
                           t.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL))
                       }
@@ -657,10 +699,10 @@ jobs:
                   styleButton(b)
                   if (primary) {
                       b.setTextColor(ACCENT_FG)
-                      b.background = rounded(ctx, ACCENT, 14)
+                      b.background = rounded(ctx, ACCENT, 16)
                   } else {
                       b.setTextColor(TEXT)
-                      b.background = rounded(ctx, SURFACE2, 14, LINE, 1)
+                      b.background = rounded(ctx, SURFACE2, 16, LINE, 1)
                   }
                   b.setOnClickListener { onClick() }
                   return b
@@ -672,7 +714,7 @@ jobs:
                   b.text = label
                   styleButton(b)
                   b.setTextColor(BAD)
-                  b.background = rounded(ctx, Color.parseColor("#2A1A20"), 14, BAD, 1)
+                  b.background = rounded(ctx, Color.parseColor("#2A1519"), 16, BAD, 1)
                   b.setOnClickListener { onClick() }
                   return b
               }
@@ -1040,6 +1082,7 @@ jobs:
           import android.os.PowerManager
           import android.provider.Settings
           import android.view.Gravity
+          import android.view.View
           import android.view.ViewGroup
           import android.widget.Button
           import android.widget.EditText
@@ -1062,6 +1105,7 @@ jobs:
               private var live: Runnable? = null
               private var tab = 0
               private var weekOff = 0
+              private var statPeriod = 0
               private val loc = Locale("ro", "RO")
               private var pendL = ""
               private var pendT = ""
@@ -1080,7 +1124,7 @@ jobs:
 
                   val root = LinearLayout(this)
                   root.orientation = LinearLayout.VERTICAL
-                  root.setBackgroundColor(Ui.BG)
+                  root.background = Ui.bgGradient()
 
                   val header = LinearLayout(this)
                   header.orientation = LinearLayout.VERTICAL
@@ -1105,11 +1149,10 @@ jobs:
                   content = FrameLayout(this)
                   root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-                  root.addView(Ui.divider(this))
                   val bar = LinearLayout(this)
                   bar.orientation = LinearLayout.HORIZONTAL
-                  bar.setBackgroundColor(Ui.SURFACE)
-                  bar.setPadding(dp(8), dp(8), dp(8), dp(10))
+                  bar.background = Ui.rounded(this, Ui.SURFACE, 32, Ui.LINE, 1)
+                  bar.setPadding(dp(6), dp(6), dp(6), dp(6))
                   val names = listOf("Tură", "GPL", "Săptămâna", "Setări")
                   val icons = listOf("◉", "⛽", "▦", "⚙")
                   for (i in names.indices) {
@@ -1129,7 +1172,9 @@ jobs:
                       bar.addView(b, p)
                       tabButtons.add(b)
                   }
-                  root.addView(bar)
+                  val barLp = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                  barLp.setMargins(dp(14), dp(4), dp(14), dp(14))
+                  root.addView(bar, barLp)
 
                   setContentView(root)
                   show(0)
@@ -1176,11 +1221,11 @@ jobs:
                   for (k in tabButtons.indices) {
                       val b = tabButtons[k]
                       if (k == i) {
-                          b.setTextColor(Ui.ACCENT)
-                          b.background = Ui.rounded(this, Ui.SURFACE2, 14, Ui.LINE, 1)
+                          b.setTextColor(Ui.ACCENT_FG)
+                          b.background = Ui.rounded(this, Ui.ACCENT, 26)
                       } else {
                           b.setTextColor(Ui.MUTED)
-                          b.background = Ui.rounded(this, Ui.SURFACE, 14)
+                          b.background = Ui.rounded(this, 0, 26)
                       }
                   }
                   val col = LinearLayout(this)
@@ -1267,6 +1312,19 @@ jobs:
                   r.addView(cell(tips, false, c, 0.8f, true))
                   r.addView(cell(gpl, false, c, 0.9f, true))
                   r.addView(cell(profit, !header, if (header) Ui.MUTED else profitColor, 1f, true))
+                  return r
+              }
+
+              private fun tilePair(a: View, b: View): LinearLayout {
+                  val r = LinearLayout(this)
+                  r.orientation = LinearLayout.HORIZONTAL
+                  val la = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                  la.setMargins(0, 0, dp(5), 0)
+                  val lb = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                  lb.setMargins(dp(5), 0, 0, 0)
+                  r.addView(a, la)
+                  r.addView(b, lb)
+                  r.layoutParams = Ui.lp(this, 0, 10)
                   return r
               }
 
@@ -1425,43 +1483,72 @@ jobs:
                   val paused = active && Store.isPaused(this)
 
                   val c = Ui.hero(this)
-                  c.addView(Ui.text(this, if (paused) "TURĂ PE PAUZĂ" else if (active) "TURĂ ÎN CURS" else "TURĂ", 12f, if (paused) Ui.BAD else Ui.MUTED, true))
-                  val kmView = Ui.text(this, "", 56f, if (paused) Ui.MUTED else Ui.ACCENT, true)
-                  val timeView = Ui.text(this, "", 16f, Ui.TEXT)
+                  val capt = Ui.text(this, if (paused) "TURĂ PE PAUZĂ" else if (active) "TURĂ ÎN CURS" else "TURĂ", 12f, if (paused) Ui.BAD else Ui.MUTED, true)
+                  capt.gravity = Gravity.CENTER
+                  c.addView(capt, Ui.lp(this, 0))
+
+                  val ring = LinearLayout(this)
+                  ring.orientation = LinearLayout.VERTICAL
+                  ring.gravity = Gravity.CENTER
+                  ring.background = Ui.circle(this, Ui.BG, if (paused) Ui.MUTED else Ui.ACCENT, 5)
+                  val ringLp = LinearLayout.LayoutParams(dp(200), dp(200))
+                  ringLp.gravity = Gravity.CENTER_HORIZONTAL
+                  ringLp.setMargins(0, dp(14), 0, dp(14))
+                  c.addView(ring, ringLp)
+
+                  val kmView = Ui.text(this, "", 54f, if (paused) Ui.MUTED else Ui.ACCENT, true)
+                  kmView.gravity = Gravity.CENTER
+                  val timeView = Ui.text(this, "", 18f, Ui.TEXT)
+                  timeView.gravity = Gravity.CENTER
                   val gpsView = Ui.text(this, "", 13f, Ui.MUTED)
+                  gpsView.gravity = Gravity.CENTER
                   if (active) {
-                      c.addView(kmView)
-                      c.addView(timeView)
-                      c.addView(gpsView)
+                      ring.addView(kmView)
+                      val u = Ui.text(this, "KM", 12f, Ui.MUTED, true)
+                      u.gravity = Gravity.CENTER
+                      ring.addView(u)
+                      c.addView(timeView, Ui.lp(this, 2))
+                      c.addView(gpsView, Ui.lp(this, 4))
                       val b0 = Store.startBoltBal(this)
                       val u0 = Store.startUberBal(this)
                       val balText = "Sold început: Bolt " + (if (b0 != null) Ui.num(b0, 2) else "—") + " • Uber " + (if (u0 != null) Ui.num(u0, 2) else "—") + "  (atinge pentru a modifica)"
                       val balView = Ui.text(this, balText, 12f, Ui.MUTED)
+                      balView.gravity = Gravity.CENTER
                       balView.setPadding(0, dp(6), 0, 0)
                       balView.setOnClickListener {
                           twoDialog(
                               "Sold la începutul turei", "", "Sold Bolt (lei)", "Sold Uber (lei)", b0, u0,
                               "Salvează", "Anulează",
-                              { b, u ->
-                                  Store.setStartBalance(this, b, u)
+                              { b, u2 ->
+                                  Store.setStartBalance(this, b, u2)
                                   show(0)
                               },
                               { }
                           )
                       }
-                      c.addView(balView)
-                      if (paused) {
-                          c.addView(Ui.button(this, "Reia tura", true) { resumeShift() })
-                          c.addView(Ui.danger(this, "Închide tura") { endShift() })
-                      } else {
-                          c.addView(Ui.button(this, "Pauză", false) { pauseShift() })
-                          c.addView(Ui.danger(this, "Închide tura") { endShift() })
-                      }
+                      c.addView(balView, Ui.lp(this, 0))
+                      val row = LinearLayout(this)
+                      row.orientation = LinearLayout.HORIZONTAL
+                      val b1 = if (paused) Ui.button(this, "Reia tura", true) { resumeShift() } else Ui.button(this, "Pauză", false) { pauseShift() }
+                      val b2 = Ui.danger(this, "Închide tura") { endShift() }
+                      val l1 = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                      l1.setMargins(0, dp(12), dp(6), 0)
+                      val l2 = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                      l2.setMargins(dp(6), dp(12), 0, 0)
+                      row.addView(b1, l1)
+                      row.addView(b2, l2)
+                      c.addView(row, Ui.lp(this, 0))
                   } else {
-                      val hint = Ui.text(this, "Apasă pentru a număra kilometrii cu GPS-ul, până când închizi tura.", 14f, Ui.MUTED)
-                      hint.setPadding(0, dp(6), 0, 0)
-                      c.addView(hint)
-                      c.addView(Ui.button(this, "Începe tura", true) { startShift() })
+                      val go = Ui.text(this, "START", 38f, Ui.ACCENT, true)
+                      go.gravity = Gravity.CENTER
+                      ring.addView(go)
+                      val tap = Ui.text(this, "atinge", 12f, Ui.MUTED)
+                      tap.gravity = Gravity.CENTER
+                      ring.addView(tap)
+                      ring.setOnClickListener { startShift() }
+                      val hint = Ui.text(this, "Kilometrii se numără cu GPS-ul până când închizi tura.", 14f, Ui.MUTED)
+                      hint.gravity = Gravity.CENTER
+                      c.addView(hint, Ui.lp(this, 0))
                   }
                   col.addView(c)
 
@@ -1503,18 +1590,28 @@ jobs:
                   }
                   val sum = Ui.card(this)
                   sum.addView(Ui.text(this, "STATISTICI", 12f, Ui.MUTED, true))
-                  sum.addView(tableRow("", "Km", "Încasat", "Tips", "GPL", "Profit", true, Ui.MUTED))
-                  sum.addView(Ui.divider(this))
+                  val chipRow = LinearLayout(this)
+                  chipRow.orientation = LinearLayout.HORIZONTAL
+                  chipRow.setPadding(0, dp(10), 0, dp(4))
+                  val chipNames = listOf("Azi", "Săpt.", "Luna", "Total")
                   for (k in 0 until 4) {
-                      val pr = incS[k] + tipS[k] - gplS[k]
-                      sum.addView(
-                          tableRow(
-                              names[k], Ui.num(kmS[k], 1), Ui.num(incS[k], 0), Ui.num(tipS[k], 0), Ui.num(gplS[k], 0), Ui.num(pr, 0),
-                              false, if (pr >= 0.0) Ui.GOOD else Ui.BAD
-                          )
-                      )
-                      if (k < 3) sum.addView(Ui.divider(this))
+                      val ch = Ui.chip(this, chipNames[k], k == statPeriod) {
+                          statPeriod = k
+                          show(0)
+                      }
+                      val cl = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                      cl.setMargins(dp(3), 0, dp(3), 0)
+                      chipRow.addView(ch, cl)
                   }
+                  sum.addView(chipRow)
+                  val sp = statPeriod
+                  val pr = incS[sp] + tipS[sp] - gplS[sp]
+                  val plab = Ui.text(this, "PROFIT • " + names[sp].uppercase(), 11f, Ui.MUTED, true)
+                  plab.setPadding(0, dp(14), 0, 0)
+                  sum.addView(plab)
+                  sum.addView(Ui.text(this, (if (pr >= 0.0) "+" else "") + Ui.num(pr, 0) + " lei", 46f, if (pr >= 0.0) Ui.GOOD else Ui.BAD, true))
+                  sum.addView(tilePair(Ui.tile(this, "KILOMETRI", Ui.num(kmS[sp], 1), Ui.TEXT), Ui.tile(this, "ÎNCASAT", Ui.num(incS[sp], 0) + " lei", Ui.TEXT)))
+                  sum.addView(tilePair(Ui.tile(this, "TIPS", Ui.num(tipS[sp], 0) + " lei", Ui.GOOD), Ui.tile(this, "GPL", Ui.num(gplS[sp], 0) + " lei", Ui.BAD)))
                   val foot = Ui.text(this, "Încasat = diferența de sold (final − început). Profit = încasat + tips − GPL din bonuri. O tură se numără în ziua în care a început.", 11f, Ui.MUTED)
                   foot.setPadding(0, dp(8), 0, 0)
                   sum.addView(foot)
@@ -1565,8 +1662,8 @@ jobs:
                           override fun run() {
                               val st = Store.activeStart(this@MainActivity)
                               if (st == 0L) return
-                              kmView.text = Ui.num(Store.activeKm(this@MainActivity), 1) + " km"
-                              timeView.text = "durată " + fmtDur(Store.activeElapsed(this@MainActivity))
+                              kmView.text = Ui.num(Store.activeKm(this@MainActivity), 1)
+                              timeView.text = fmtDur(Store.activeElapsed(this@MainActivity))
                               if (Store.isPaused(this@MainActivity)) {
                                   gpsView.text = "GPS oprit în pauză"
                                   gpsView.setTextColor(Ui.MUTED)
@@ -2218,7 +2315,7 @@ jobs:
                           Toast.makeText(this, "Nu pot deschide selectorul de fișiere", Toast.LENGTH_LONG).show()
                       }
                   })
-                  val ver = Ui.text(this, "FCM APP versiunea 3.1", 11f, Ui.MUTED)
+                  val ver = Ui.text(this, "FCM APP versiunea 3.2", 11f, Ui.MUTED)
                   ver.setPadding(0, dp(10), 0, 0)
                   bk.addView(ver)
                   col.addView(bk)
