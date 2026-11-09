@@ -58,8 +58,8 @@ jobs:
                   applicationId = "ro.calculatorcursa"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 16
-                  versionName = "2.9"
+                  versionCode = 17
+                  versionName = "3.0"
               }
 
               // cheie de semnare fixă: actualizările se instalează peste aplicația existentă, fără ștergere
@@ -249,7 +249,7 @@ jobs:
 
           data class Fill(val id: Long, val date: Long, val liters: Double, val total: Double, val odo: Double)
 
-          data class Tip(val id: Long, val date: Long, val cash: Double, val fare: Double, val tip: Double)
+          data class Tip(val id: Long, val date: Long, val cash: Double, val fare: Double, val tip: Double, val rest: Double = 0.0)
 
           data class Shift(val id: Long, val start: Long, val end: Long, val km: Double, val pausedMs: Long = 0L, val bolt: Double = 0.0, val uber: Double = 0.0)
 
@@ -301,7 +301,7 @@ jobs:
                       val a = JSONArray(sp(ctx).getString("tips", "[]"))
                       for (i in 0 until a.length()) {
                           val o = a.getJSONObject(i)
-                          out.add(Tip(o.getLong("id"), o.getLong("d"), o.getDouble("c"), o.getDouble("f"), o.getDouble("t")))
+                          out.add(Tip(o.getLong("id"), o.getLong("d"), o.getDouble("c"), o.getDouble("f"), o.getDouble("t"), o.optDouble("r", 0.0)))
                       }
                   } catch (e: Exception) {
                   }
@@ -317,15 +317,17 @@ jobs:
                       o.put("c", t.cash)
                       o.put("f", t.fare)
                       o.put("t", t.tip)
+                      o.put("r", t.rest)
                       a.put(o)
                   }
                   sp(ctx).edit().putString("tips", a.toString()).apply()
               }
 
-              fun addTip(ctx: Context, cash: Double, fare: Double) {
+              // bacșiș = cash primit − preț comandă − rest dat clientului
+              fun addTip(ctx: Context, cash: Double, fare: Double, rest: Double) {
                   val l = tips(ctx).toMutableList()
                   val now = System.currentTimeMillis()
-                  l.add(Tip(now, now, cash, fare, cash - fare))
+                  l.add(Tip(now, now, cash, fare, cash - fare - rest, rest))
                   saveTips(ctx, l)
               }
 
@@ -1525,51 +1527,61 @@ jobs:
               private fun buildTips(col: LinearLayout) {
                   val card = Ui.card(this)
                   card.addView(Ui.text(this, "BACȘIȘ (CASH)", 12f, Ui.MUTED, true))
-                  val hint = Ui.text(this, "Clientul a dat cash mai mult decât comanda; diferența e bacșișul. Ex.: a dat 50, comanda 39 = 11 lei.", 13f, Ui.MUTED)
+                  val hint = Ui.text(this, "Ex.: clientul dă 100, comanda 60, tu dai rest 30 → bacșiș 10. Dacă nu dai rest, lasă câmpul gol: bacșișul e cash − comandă.", 13f, Ui.MUTED)
                   hint.setPadding(0, dp(6), 0, dp(4))
                   card.addView(hint)
-                  val inCash = Ui.input(this, "Cash primit (lei)", true)
+                  val inCash = Ui.input(this, "Cât ți-a dat clientul (lei)", true)
                   val inFare = Ui.input(this, "Prețul comenzii (lei)", true)
-                  val res = Ui.text(this, "", 20f, Ui.ACCENT, true)
+                  val inRest = Ui.input(this, "Rest dat clientului (lei, opțional)", true)
+                  val res = Ui.text(this, "", 15f, Ui.TEXT)
                   res.setPadding(0, dp(8), 0, 0)
+                  val resTip = Ui.text(this, "", 22f, Ui.ACCENT, true)
                   card.addView(inCash, Ui.lp(this, 8, 8))
-                  card.addView(inFare, Ui.lp(this, 0))
+                  card.addView(inFare, Ui.lp(this, 8))
+                  card.addView(inRest, Ui.lp(this, 0))
                   card.addView(res)
+                  card.addView(resTip)
                   val watcher = object : TextWatcher {
                       override fun beforeTextChanged(x: CharSequence?, a: Int, b: Int, c: Int) {}
                       override fun onTextChanged(x: CharSequence?, a: Int, b: Int, c: Int) {}
                       override fun afterTextChanged(x: Editable?) {
                           val c = parseMoney(inCash)
                           val f = parseMoney(inFare)
+                          val r = parseMoney(inRest) ?: 0.0
                           if (c != null && f != null) {
-                              val t = c - f
-                              if (t > 0.0) {
-                                  res.text = "Bacșiș: " + Ui.num(t, 2) + " lei"
-                                  res.setTextColor(Ui.GOOD)
-                              } else if (t == 0.0) {
-                                  res.text = "Fără bacșiș"
-                                  res.setTextColor(Ui.MUTED)
-                              } else {
+                              val due = c - f
+                              val t = c - f - r
+                              if (due < 0.0) {
                                   res.text = "Cashul e mai mic decât comanda"
-                                  res.setTextColor(Ui.BAD)
+                                  resTip.text = ""
+                              } else if (t < 0.0) {
+                                  res.text = "Restul e prea mare: din " + Ui.num(c, 2) + " cu comanda de " + Ui.num(f, 2) + " restul maxim e " + Ui.num(due, 2)
+                                  resTip.text = ""
+                              } else {
+                                  res.text = "Rest de dat fără bacșiș: " + Ui.num(due, 2) + " lei\nRest dat: " + Ui.num(r, 2) + " lei\nCash rămas la tine: " + Ui.num(c - r, 2) + " lei"
+                                  resTip.text = if (t > 0.0) "Bacșiș: " + Ui.num(t, 2) + " lei" else "Fără bacșiș"
+                                  resTip.setTextColor(if (t > 0.0) Ui.GOOD else Ui.MUTED)
                               }
                           } else {
                               res.text = ""
+                              resTip.text = ""
                           }
                       }
                   }
                   inCash.addTextChangedListener(watcher)
                   inFare.addTextChangedListener(watcher)
+                  inRest.addTextChangedListener(watcher)
                   card.addView(Ui.button(this, "Adaugă bacșișul", true) {
                       val c = parseMoney(inCash)
                       val f = parseMoney(inFare)
+                      val r = parseMoney(inRest) ?: 0.0
                       if (c == null || f == null || f <= 0.0) {
-                          Toast.makeText(this, "Completează cashul și prețul comenzii", Toast.LENGTH_SHORT).show()
-                      } else if (c <= f) {
-                          Toast.makeText(this, "Cashul trebuie să fie mai mare decât comanda", Toast.LENGTH_SHORT).show()
+                          Toast.makeText(this, "Completează cât ți-a dat clientul și prețul comenzii", Toast.LENGTH_SHORT).show()
+                      } else if (c - f - r <= 0.0) {
+                          Toast.makeText(this, "Nu rezultă bacșiș. Verifică cifrele", Toast.LENGTH_SHORT).show()
                       } else {
-                          Store.addTip(this, c, f)
-                          Toast.makeText(this, "Bacșiș salvat: " + Ui.num(c - f, 2) + " lei", Toast.LENGTH_SHORT).show()
+                          Store.addTip(this, c, f, r)
+                          Toast.makeText(this, "Bacșiș salvat: " + Ui.num(c - f - r, 2) + " lei", Toast.LENGTH_SHORT).show()
                           show(0)
                       }
                   })
@@ -1597,7 +1609,7 @@ jobs:
                       val df = SimpleDateFormat("dd.MM HH:mm", loc)
                       for (t in tips.take(5)) {
                           val left = df.format(Date(t.date)) + "  •  +" + Ui.num(t.tip, 2) + " lei"
-                          val sub = "cash " + Ui.num(t.cash, 2) + " − comandă " + Ui.num(t.fare, 2)
+                          val sub = "cash " + Ui.num(t.cash, 2) + " − comandă " + Ui.num(t.fare, 2) + (if (t.rest > 0.0) " − rest " + Ui.num(t.rest, 2) else "")
                           card.addView(listRow(left, sub, null) {
                               Store.deleteTip(this, t.id)
                               show(0)
@@ -2136,7 +2148,7 @@ jobs:
                           Toast.makeText(this, "Nu pot deschide selectorul de fișiere", Toast.LENGTH_LONG).show()
                       }
                   })
-                  val ver = Ui.text(this, "FCM APP versiunea 2.9", 11f, Ui.MUTED)
+                  val ver = Ui.text(this, "FCM APP versiunea 3.0", 11f, Ui.MUTED)
                   ver.setPadding(0, dp(10), 0, 0)
                   bk.addView(ver)
                   col.addView(bk)
